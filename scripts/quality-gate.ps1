@@ -70,7 +70,9 @@ function Add-Result {
   Write-Host ("  [{0,-6}] {1,-26} {2}" -f $Status, $Name, $Detail) -ForegroundColor $color
 }
 
-# ── 取"被 git 跟踪的文件清单"：**只此一份**（A1/A2 原先各写一份裸 `git ls-files`，出过事）──
+# ── 取"被 git 跟踪的文件清单"：**本脚本只此一份**（A1/A2 原先各写一份裸 `git ls-files`，出过事）──
+# （⚠️ `redline-check.ps1` 里还有**另一份**同款实现 —— 那是它第四轮复审后自己修的；两个脚本之间
+#   没有共享模块，这里**不**顺手抽公共文件：把"判据变更"和"重构"混进同一个提交，会让复审变难。）
 # 为什么要绕这一圈（2026-09-13 实测；与 redline-check.ps1 是同一个坑，那边第四轮复审就修过）：
 #   `git ls-files` 默认 `core.quotePath=true`，非 ASCII 路径被输出成**带引号的八进制转义**
 #   （`"docs/\344\270\255\346\226\207/.env"`）⇒ ① A1 的文件名正则匹配不上（末尾多了个引号）
