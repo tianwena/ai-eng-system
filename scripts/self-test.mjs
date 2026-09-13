@@ -1197,6 +1197,59 @@ const CASES = [
     },
   },
   {
+    name: "中文名文件与中文目录下的文件，quality-gate 的 A1/A2 都必须看得见",
+    // **为什么加**（2026-09-13 实测漏网）：A1/A2 原先各写一份**裸 `git ls-files`**，
+    // 而它默认 `core.quotePath=true` ⇒ 非 ASCII 路径被输出成**带引号的八进制转义**
+    // （`"docs/\344\270\255\346\226\207/.env"`）⇒ A1 的文件名正则匹配不上（末尾多个引号）、
+    // A2 的扩展名过滤也落空 ⇒ **中文名文件、中文目录下的文件被静默跳过**。
+    // 实测（两份内容逐字节相同，只有名字一个中文一个 ASCII）：
+    //   · 两个 `.env`（目录名不同，都被跟踪）⇒ A1 只报 `1 file(s): …asciidir/.env`
+    //   · 两个 `.py`（文件名不同）⇒ A2 只报 1 hit；**只留中文名那个 ⇒ A2 打 `PASS`**（假绿）
+    // 本库自己有一堆中文名文档 ⇒ 这在本库上是"常态漏扫"，不是边角。
+    // 判据：这种仓库里 A1 必须点名**两个** `.env`（`2 file(s)`），A2 必须报 **2 hit(s)**。
+    // ⚠️ 变异：把 `Get-GitTrackedFiles` 的 `-c core.quotePath=false` 去掉（或把 A1/A2 改回裸
+    //    `git ls-files`）⇒ 这条必须红（变异 M19 实测）。
+    check: (d) => {
+      const ps = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      if (!existsSync(ps)) return { code: 0, expectCode: 0, out: "没有 powershell.exe —— 本项跳过（不算失败）" };
+      const proj = join(d, "tests", "fixtures", "gate-cjkpaths");
+      mkdirSync(join(proj, "asciidir"), { recursive: true });
+      mkdirSync(join(proj, "中文目录"), { recursive: true });
+      writeFileSync(join(proj, "asciidir", ".env"), "MODE=production\n", "utf8");
+      writeFileSync(join(proj, "中文目录", ".env"), "MODE=production\n", "utf8");
+      const KEY = 'api_key = "abcdefghijklmnopqrstuvwxyz123456"\n';  // nosemgrep: generic.secrets.security.detected-generic-api-key.detected-generic-api-key — redline-allow: 自检样例里的假密钥（不是真密钥；两个扫描器共用这一个标记）
+      writeFileSync(join(proj, "ascii_cfg.py"), KEY, "utf8");
+      writeFileSync(join(proj, "中文配置.py"), KEY, "utf8");
+      const git = (args) => spawnSync("git", args, { cwd: proj, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+      // `-f`：别让任何 `.gitignore`（本机的 core.excludesFile 也算）把 `.env` 挡在跟踪之外
+      git(["init", "-q"]); git(["add", "-A", "-f"]); git(["commit", "-qm", "i"]);
+      if (!existsSync(join(proj, ".git"))) return { code: 0, expectCode: 0, out: "本机没有可用的 git —— 本项跳过（不算失败）" };
+      const json = join(d, "tests", "fixtures", "gate-cjk-report.json");
+      const fakeHome = join(d, "tests", "fixtures", "fake-home");
+      mkdirSync(fakeHome, { recursive: true });
+      const env = { ...process.env, USERPROFILE: fakeHome, APPDATA: fakeHome, LOCALAPPDATA: fakeHome, PATH: process.env.PATH };
+      const r = spawnSync(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(d, "scripts", "quality-gate.ps1"), "-Path", proj, "-Json", json], { cwd: d, encoding: "utf8", env });
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      const problems = [];
+      let rep = null;
+      try { rep = JSON.parse(readFileSync(json, "utf8")); }
+      catch (e) { problems.push(`读不到闸门的 JSON 报告：${e.code ?? e.message}`); }
+      if (rep) {
+        // ⚠️ 字段名是 `results` + `Id/Status/Detail`（大写开头）—— 报告结构别凭记忆写
+        const byId = (id) => (rep.results ?? []).find((x) => x.Id === id);
+        const a1 = byId("A1"); const a2 = byId("A2");
+        if (!a1 || !a2) problems.push("报告里没有 A1 或 A2 这两项（闸门少项了）");
+        else {
+          if (a1.Status !== "FAIL") problems.push(`A1 状态是 ${a1.Status}（两个敏感文件名都被跟踪，应当 FAIL）`);
+          if (!/2 file\(s\)/.test(a1.Detail ?? "")) problems.push(`A1 的明细是「${a1.Detail}」—— 中文目录下那个 .env 没被看见（期望 2 file(s)）`);
+          if (a2.Status !== "FAIL") problems.push(`A2 状态是 ${a2.Status}（两处明文密钥，应当 FAIL）`);
+          if (!/^2 hit\(s\)/.test(a2.Detail ?? "")) problems.push(`A2 的明细是「${a2.Detail}」—— 中文名那个 .py 没被扫（期望 2 hit(s)）`);
+        }
+      }
+      return { code: problems.length ? 1 : 0, expectCode: 0, raw: out, out: problems.length ? problems.join("；") : "A1 认出两个 .env、A2 报出两处密钥（中文名与中文目录都没漏）" };
+    },
+  },
+  {
     name: "被跟踪文件里带中文名的密钥也要扫到（复审第四轮 F2）",
     // **为什么加**：`git ls-files` 默认 `core.quotePath=true`，非 ASCII 路径被输出成
     // **带引号的八进制转义**（`"docs/00-\351\241\271..."`），`Test-Path` 直接抛

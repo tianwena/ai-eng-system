@@ -44,7 +44,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$ProjectRoot = (Resolve-Path -LiteralPath $Path).Path
+# ⚠️ 与 redline-check.ps1 同一条纪律：路径取 provider 的规范形态（Get-Item 的 .FullName），
+#    **不要**用 `Resolve-Path` 的 `.Path` —— 后者会原样保留传进来的 8.3 短名，而下面
+#    `$f.FullName.Substring($ProjectRoot.Length)` 这类"相对化"会在短名路径下算出乱码标签。
+$ProjectRoot = (Get-Item -LiteralPath $Path -ErrorAction Stop).FullName
 $results = [System.Collections.Generic.List[object]]::new()
 
 # ⚠️ `-RuffLabel` 的早退必须放在**这里** —— 在"补 PATH"那段之前。
@@ -65,6 +68,31 @@ function Add-Result {
   $results.Add([PSCustomObject]@{ Id = $Id; Name = $Name; Status = $Status; Detail = $Detail })
   $color = switch ($Status) { 'PASS' { 'Green' } 'FAIL' { 'Red' } 'NOTRUN' { 'Magenta' } 'SKIP' { 'DarkGray' } default { 'Gray' } }
   Write-Host ("  [{0,-6}] {1,-26} {2}" -f $Status, $Name, $Detail) -ForegroundColor $color
+}
+
+# ── 取"被 git 跟踪的文件清单"：**只此一份**（A1/A2 原先各写一份裸 `git ls-files`，出过事）──
+# 为什么要绕这一圈（2026-09-13 实测；与 redline-check.ps1 是同一个坑，那边第四轮复审就修过）：
+#   `git ls-files` 默认 `core.quotePath=true`，非 ASCII 路径被输出成**带引号的八进制转义**
+#   （`"docs/\344\270\255\346\226\207/.env"`）⇒ ① A1 的文件名正则匹配不上（末尾多了个引号）
+#   ② A2 的扩展名过滤同样落空 ⇒ **中文名文件、中文目录下的文件被静默跳过**。
+#   实测（两份内容逐字节相同，只有名字一个中文一个 ASCII）：
+#     · 两个 `.env`（目录名不同，都在 git 里）⇒ A1 只报 `1 file(s): …asciidir/.env`，另一个不见
+#     · 两个 `.py`（文件名不同）⇒ A2 只报 1 hit；**只留中文名那个 ⇒ A2 打 `PASS`**（假绿）
+#   本库自己就有一堆中文名文档 ⇒ 这在本库上是"常态漏扫"，不是边角情况。
+# 修法照抄 redline 的成熟做法：`-c core.quotePath=false` 关掉转义 + cmd 把 git 的原始字节
+#   重定向进临时文件、再用 `Get-Content -Encoding UTF8` 显式解码（**不碰控制台代码页状态**：
+#   在 936 终端上改 `[Console]::OutputEncoding` 会让整份报告变成乱码 —— redline 那里踩过）。
+function Get-GitTrackedFiles {
+  param([Parameter(Mandatory = $true)][string]$RepoRoot)
+  $tmp = [System.IO.Path]::GetTempFileName()
+  Push-Location $RepoRoot
+  try {
+    $null = & cmd.exe /c "git -c core.quotePath=false ls-files > `"$tmp`" 2>nul"
+    return @(Get-Content -LiteralPath $tmp -Encoding UTF8 | Where-Object { $_ -ne '' })
+  } finally {
+    Pop-Location
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  }
 }
 
 # ── 「没跑成」的判据（第四档，2026-09-13 补）─────────────────────────────────
@@ -168,17 +196,16 @@ if ($staleReports.Count -gt 0) {
 Write-Host 'A. Secrets' -ForegroundColor Cyan
 
 # A1: 敏感文件名是否被 git 跟踪
+# ⚠️ 清单**必须**走 `Get-GitTrackedFiles`（见它的注释）：裸 `git ls-files` 会把中文名路径转义成
+#    八进制，于是那些文件在这里"不存在"—— 实测两个内容相同的 `.env` 只报出一个。
 if (Test-Path (Join-Path $ProjectRoot '.git')) {
-  Push-Location $ProjectRoot
-  try {
-    $tracked = @(git ls-files 2>$null)
-    $suspects = @($tracked | Where-Object { $_ -match '(^|/)(\.env($|\.)|.*\.pem$|.*\.key$|.*\.p12$|id_rsa|credentials(\.json)?$)' -and $_ -notmatch '\.example$|\.sample$|\.template$' })
-    if ($suspects.Count -gt 0) {
-      Add-Result 'A1' 'tracked secret-like files' 'FAIL' ("$($suspects.Count) file(s): " + ($suspects -join ', '))
-    } else {
-      Add-Result 'A1' 'tracked secret-like files' 'PASS' 'none'
-    }
-  } finally { Pop-Location }
+  $tracked = Get-GitTrackedFiles -RepoRoot $ProjectRoot
+  $suspects = @($tracked | Where-Object { $_ -match '(^|/)(\.env($|\.)|.*\.pem$|.*\.key$|.*\.p12$|id_rsa|credentials(\.json)?$)' -and $_ -notmatch '\.example$|\.sample$|\.template$' })
+  if ($suspects.Count -gt 0) {
+    Add-Result 'A1' 'tracked secret-like files' 'FAIL' ("$($suspects.Count) file(s): " + ($suspects -join ', '))
+  } else {
+    Add-Result 'A1' 'tracked secret-like files' 'PASS' 'none'
+  }
 } else {
   Add-Result 'A1' 'tracked secret-like files' 'SKIP' 'not a git repo'
 }
@@ -187,12 +214,15 @@ if (Test-Path (Join-Path $ProjectRoot '.git')) {
 if (Test-Path (Join-Path $ProjectRoot '.git')) {
   Push-Location $ProjectRoot
   try {
-    $files = @(git ls-files 2>$null | Where-Object { $_ -match '\.(py|js|ts|tsx|jsx|json|ya?ml|toml|ini|cfg|ps1|sh|env|txt|md)$' })
+    $files = @(Get-GitTrackedFiles -RepoRoot $ProjectRoot | Where-Object { $_ -match '\.(py|js|ts|tsx|jsx|json|ya?ml|toml|ini|cfg|ps1|sh|env|txt|md)$' })
     # 只匹配"看着像真密钥"的：常见前缀 + 足够长度
     $pattern = 'sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(api[_-]?key|apikey|secret|token|password)\s*[:=]\s*["'']([A-Za-z0-9_\-]{24,})["'']'
     $hits = [System.Collections.Generic.List[string]]::new()
+    $missing = 0
     foreach ($f in $files) {
-      if (-not (Test-Path -LiteralPath $f)) { continue }
+      # ⚠️ 定位不到就**数出来**（静默 `continue` 正是 A1/A2 那个中文名假绿的成因：
+      #    "扫了 N 个"里的 N 悄悄漏掉了认不出的那些，读的人却以为清单是完整的）。
+      if (-not (Test-Path -LiteralPath $f)) { $missing++; continue }
       try {
         $m = Select-String -LiteralPath $f -Pattern $pattern -AllMatches -ErrorAction SilentlyContinue
         foreach ($x in $m) { $hits.Add("$f`:$($x.LineNumber)") }
@@ -201,7 +231,8 @@ if (Test-Path (Join-Path $ProjectRoot '.git')) {
     if ($hits.Count -gt 0) {
       Add-Result 'A2' 'hardcoded credentials' 'FAIL' ("$($hits.Count) hit(s), e.g. " + ($hits | Select-Object -First 3 | ForEach-Object { $_ }) -join ' ')
     } else {
-      Add-Result 'A2' 'hardcoded credentials' 'PASS' "$($files.Count) tracked files scanned"
+      $missNote = if ($missing -gt 0) { " —— ⚠️ 另有 $missing 个被跟踪文件在工作区定位不到，**没扫**（这个数字不含它们，别把清单读成完整的）" } else { '' }
+      Add-Result 'A2' 'hardcoded credentials' 'PASS' "$($files.Count) tracked files scanned$missNote"
     }
   } finally { Pop-Location }
 } else {
