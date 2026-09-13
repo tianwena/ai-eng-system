@@ -1,0 +1,105 @@
+#!/bin/sh
+# 提交前自检 —— 只跑"库自身的完整性"（秒级），不跑项目闸门（那是 quality-gate.ps1 的事）。
+# 为什么需要它：本库的坑有三大类，且**全都不报错、只是悄悄坏掉**——
+#   1. 技能 frontmatter 的 YAML 写坏 → 技能静默消失，不报错（validate-skills.mjs 抓）
+#   2. .ps1 被编辑工具吃掉 BOM → PS 5.1 下中文乱码/语法错（verify-ps1.mjs 抓）
+#   3. 文档里的数字/清单/链接与真值分叉 → 谁都不知道（check-consistency.mjs 抓）
+# 这三类都发生过，所以让机器在提交时挡一次，比靠记性便宜。
+#
+# 安装：powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-git-hooks.ps1
+# 绕过：git commit --no-verify   ← 绕过就是这次没自检，**别当常规操作**
+set -u
+
+log() { printf '%s\n' "$1"; }
+
+if ! command -v node >/dev/null 2>&1; then
+  log "✗ 找不到 node —— 提交前自检**无法运行**（这不等于通过）。"
+  log "  装 Node.js 后重试；确有急事可 git commit --no-verify，但那就没有任何检查。"
+  exit 1
+fi
+
+log "── pre-commit：体系自检 ──"
+
+# 0) 先确认钩子要调的东西都还在。
+#    为什么：钩子是按**固定路径**调用检查器的。实测把 check-consistency.mjs 改名之后，
+#    提交确实被挡住了（安全），但报的是"内容一致性未过 —— 改文档或改真值来源"，
+#    而真实原因是"你改了名、钩子还指着旧路径" —— 会让人去错误的方向查半天。
+#    宁可多这几行，也别让工具说一句**方向错误**的话。
+for f in validate-skills.mjs scripts/verify-ps1.mjs scripts/check-consistency.mjs scripts/extract-cheatsheets.mjs scripts/self-test.mjs; do
+  if [ ! -f "$f" ]; then
+    log "✗ 找不到 $f —— 钩子引用的文件不见了。"
+    log "  如果这次改动**改名或移动**了它：钩子按固定路径调用，必须同步改 scripts/git-hooks/pre-commit。"
+    log "  如果只是误删：git checkout -- $f"
+    exit 1
+  fi
+done
+
+# 1) PowerShell 脚本的 BOM + 语法（edit 类工具会吃掉 BOM，必须自动挡）
+if ! node scripts/verify-ps1.mjs; then
+  log ""
+  log "✗ 有 .ps1 不合格。修法：node scripts/verify-ps1.mjs -Fix（自动补 BOM），再看语法报错。"
+  exit 1
+fi
+
+# 2) 技能 frontmatter（写错 = 技能静默消失）
+if ! node validate-skills.mjs --quiet engineering productivity; then
+  log "✗ 技能体检未过 —— 上面每个问题都会让技能**静默消失**，必须修。"
+  exit 1
+fi
+
+# 3) 文档 ⇄ 真值的一致性（数字 / 脚本清单 / 链接 / 命令可执行性 / 旧名残留）
+SET=""
+if [ -n "${DSH_HOME:-}" ] && [ -d "${DSH_HOME}/skills" ]; then
+  SET="--installed ${DSH_HOME}/skills"
+elif [ -d "${HOME}/.dsh/skills" ]; then
+  SET="--installed ${HOME}/.dsh/skills"
+fi
+if ! node scripts/check-consistency.mjs $SET; then
+  log "✗ 内容一致性未过 —— 改文档或改真值来源，别放过。"
+  exit 1
+fi
+
+# 4) 速查卡是否落后于技能正文
+if ! node scripts/extract-cheatsheets.mjs --check; then
+  log "✗ 速查卡与正文漂移了（正文改了修正，速查卡还留着旧说法）。"
+  exit 1
+fi
+
+# 5) 检查器自己有改动 → 跑检查器自检（变异测试）。
+#    只在相关文件被暂存时跑：全量要复制仓库并起 PowerShell，约 20 秒，
+#    每次提交都跑会把人逼去用 --no-verify，那就什么都没了。
+#    为什么同时看 --name-only 和 --name-status：**改名会绕过只按新路径匹配的规则**。
+#    实测：`git mv scripts/check-consistency.mjs scripts/x.mjs` 之后，--name-only 只报 `scripts/x.mjs`，
+#    正则不命中 → 自检和复审提醒**双双静默失效**（一个被改名"洗白"的检查器就没人管了）。
+#    --name-status 的改名行走 `R100<TAB>旧路径<TAB>新路径`，带上它就能把旧路径一起匹配到。
+#    触发集用**目录前缀**（scripts/ tests/），不用手写文件名单。
+#    踩过的坑（复审指出，已实测）：手写名单会与"本库检查器清单"**静默分叉** ——
+#    把检查器改名/移进子目录后名单不命中，自检与复审提醒**双双失效**。
+#    用目录前缀后，新增/改名/移动都自动落在范围内，不再需要谁记得同步这份名单
+#    （check-consistency 的 script-inventory 管"文档里有没有列全"，这里管"目录动没动"）。
+RAN=".ps1 / frontmatter / 一致性 / 速查卡"
+CHANGED=$(git diff --cached --name-only 2>/dev/null; git diff --cached --name-status -M 2>/dev/null || true)
+if printf '%s\n' "$CHANGED" | grep -qE '(^|\t)(scripts/|tests/)'; then
+  # 条数**现算**，不写死：写死的话"每加一条用例就要手改钩子"—— 实测一小时内漂了两次
+  # （34→36→37→38），而**漂了就是钩子在每次提交时打印一个错的数字**（工具在说谎）。
+  # 现算的判据仍是 facts.json 那条 `hook-selftest-count` 声明（它比对登记真值），
+  # 所以现算只负责"不腐烂"，不代表没人管。
+  ST_COUNT=$(grep -c '^    name: "' scripts/self-test.mjs 2>/dev/null || echo "?")
+  RAN="$RAN / 检查器自检（$ST_COUNT 条）"
+  # 提醒**先于**自检打印。踩过的坑（复审指出）：原来放在自检之后，
+  # 一旦自检没过、改动者改成"只动文档"再提交，就再也不会收到任何提醒 —— 义务还在，提示没了。
+  log ""
+  log "  ⚠ 改了 scripts/ 或 tests/（检查器/闸门/样例）—— 按规矩（从这里开始.md 情况 D · 纪律 6）："
+  log "    需要**独立上下文的 reviewer** 复审，同一个 agent 不能既改又判。"
+  log "    本次自检全绿 ≠ 判据选对了。提示词模板见上面那份文档。"
+  log ""
+  log "· 跑自检（验证闸门抓不抓得住已知错误）"
+  if ! node scripts/self-test.mjs; then
+    log "✗ 检查器自检未过 —— 说明某个闸门**抓不住它本该抓的错误**，等于形同虚设。"
+    log "  （注意：复审义务**依然成立**，而且修完再提交时不会再提醒你一次。）"
+    exit 1
+  fi
+fi
+
+log "✓ 自检通过（$RAN）"
+exit 0

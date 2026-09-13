@@ -1,0 +1,28 @@
+{
+  "project": "state-missing-version-fixture",
+  "tier": "tech",
+  "phase": "idea",
+  "node": "n/a",
+  "artifacts": {
+    "context_md": "CONTEXT.md",
+    "er_diagram": false,
+    "state_diagram": false,
+    "interface_contract": false
+  },
+  "redline": {
+    "data_source_ok": { "confirmed": false, "at": null, "note": "" },
+    "no_redistribute": { "confirmed": false, "at": null, "note": "" }
+  },
+  "gates": {
+    "tech_redline": { "passed": false, "at": null, "evidence": "" },
+    "g1": { "passed": false, "at": null, "evidence": "" },
+    "g2": { "passed": false, "at": null, "evidence": "" },
+    "g3": { "passed": false, "at": null, "evidence": "" },
+    "g4": { "passed": false, "at": null, "evidence": "" }
+  },
+  "blockers": [],
+  "deadline": null,
+  "updated_at": "2026-09-13T00:00:00+08:00",
+  "updated_by": "lead",
+  "history": []
+}

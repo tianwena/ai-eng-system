@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "项目中央状态（.scratch/state.json）",
+  "description": "本体系多 agent 协作的**单一事实源**。为什么要它：状态原本散在 .scratch/*/issues/*.md 的 Status 行里，靠人扫一遍才能拼出『现在在哪一关』——又慢又费 token，且容易看错。一份 JSON 可被 read 直读、被脚本直改、被 git 直 diff。",
+  "type": "object",
+  "required": ["version", "project", "phase", "node", "artifacts", "gates", "updated_at", "updated_by"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "schema 版本。改结构时必须递增，并写迁移说明。"
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "description": "项目标识（通常是仓库目录名）。"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["tech", "commercial"],
+      "default": "tech",
+      "description": "闸门档位。tech = 日常自用，只跑技术红线；commercial = 决定要卖，跑 G1–G4 全套。**这是两级闸门的分流开关。**"
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["idea", "tech-review", "g1-validate", "g2-price", "g3-build", "g4-repeat", "hardening", "shipped", "paused"],
+      "description": "粗粒度阶段。tech 档走 idea → tech-review → g3-build → hardening → shipped；commercial 档在 tech-review 与 g3-build 之间插入 g1-validate、g2-price。"
+    },
+    "node": {
+      "type": "string",
+      "minLength": 1,
+      "description": "细粒度当前节点（自由文本，如 'ticket-03'、'authz-endpoint-review'）。phase 说『在哪一关』，node 说『关内哪一步』。"
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "**硬结构校验的载体**：Builder 阶段的前置产物。三张图 + 契约缺一不可进 g3-build。",
+      "required": ["context_md"],
+      "additionalProperties": false,
+      "properties": {
+        "context_md": {
+          "type": "string",
+          "description": "CONTEXT.md 的**仓库相对路径**（统一语言 + 三张图 + 契约都在里面）。"
+        },
+        "er_diagram": {
+          "type": "boolean",
+          "default": false,
+          "description": "实体关系图（Mermaid erDiagram）是否已画。"
+        },
+        "state_diagram": {
+          "type": "boolean",
+          "default": false,
+          "description": "状态流转图（Mermaid stateDiagram-v2）是否已画。**每个状态必须有出口——没有死状态。**"
+        },
+        "interface_contract": {
+          "type": "boolean",
+          "default": false,
+          "description": "接口契约（每个端点有请求/响应/错误）是否已写。"
+        },
+        "api_contract_path": {
+          "type": "string",
+          "description": "独立契约文件路径（可选；契约也可以内联在 CONTEXT.md 里）。"
+        }
+      }
+    },
+    "redline": {
+      "type": "object",
+      "description": "**人工确认的红线项**（机器查不了的那两条）。为什么单列：机器给不出结论的部分必须留下『谁在什么时候、基于什么说它没问题』——否则『未确认』会被读成『已通过』。",
+      "additionalProperties": false,
+      "properties": {
+        "data_source_ok": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "confirmed": { "type": "boolean", "default": false },
+            "at": { "type": ["string", "null"], "default": null },
+            "note": { "type": "string", "description": "为什么合法（依据，不是『我觉得没问题』）" }
+          }
+        },
+        "no_redistribute": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "confirmed": { "type": "boolean", "default": false },
+            "at": { "type": ["string", "null"], "default": null },
+            "note": { "type": "string", "description": "依据（素材授权 / 许可条款）" }
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "description": "**只有 Lead 能改**。每道闸门记录是否通过 + 通过日期 + 佐证说明",
+      "additionalProperties": false,
+      "properties": {
+        "tech_redline": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "passed": { "type": "boolean", "default": false },
+            "at": { "type": ["string", "null"], "default": null },
+            "evidence": { "type": "string", "description": "证据：命令输出 / 人确认的原话 / 报告路径" }
+          }
+        },
+        "g1": { "$ref": "#/$defs/gate" },
+        "g2": { "$ref": "#/$defs/gate" },
+        "g3": { "$ref": "#/$defs/gate" },
+        "g4": { "$ref": "#/$defs/gate" }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "description": "当前阻塞项。BLOCKED 消息的结构化版本。",
+      "items": {
+        "type": "object",
+        "required": ["what", "needs"],
+        "additionalProperties": false,
+        "properties": {
+          "what": { "type": "string", "description": "卡在哪" },
+          "tried": { "type": "string", "description": "试过什么" },
+          "needs": { "type": "string", "description": "需要谁做什么" },
+          "since": { "type": "string" }
+        }
+      }
+    },
+    "deadline": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "当前 phase 的期限（G1–G4 有默认期限）。到期必须三选一：继续（并给新期限）/ 转向 / 放弃。"
+    },
+    "updated_at": {
+      "type": "string",
+      "description": "ISO 8601 本地时间。每次改动必须更新。"
+    },
+    "updated_by": {
+      "type": "string",
+      "enum": ["lead"],
+      "description": "**只允许 lead**。其它 agent 一律不许写——否则又多一个并发踩踏点。"
+    },
+    "history": {
+      "type": "array",
+      "description": "阶段迁移轨迹（append-only）。用于回答『什么时候从 G1 进的 G2』。",
+      "items": {
+        "type": "object",
+        "required": ["at", "from", "to"],
+        "additionalProperties": false,
+        "properties": {
+          "at": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "Lead 的自由备注。别塞长文档——那会让状态文件变成新的上帝文件。"
+    }
+  },
+  "$defs": {
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "passed": { "type": "boolean", "default": false },
+        "at": { "type": ["string", "null"], "default": null },
+        "evidence": { "type": "string", "description": "可查的证据（数字 / 人 / 文件路径），不是『感觉可以了』" },
+        "deadline": { "type": ["string", "null"], "default": null }
+      }
+    }
+  }
+}

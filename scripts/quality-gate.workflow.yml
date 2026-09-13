@@ -1,0 +1,129 @@
+# 质量闸门 —— 把"上线前检查清单"变成 CI 里会真的失败的检查
+#
+# 用法：把本文件复制到你的项目 <项目根>/.github/workflows/quality-gate.yml
+#       并把 scripts/quality-gate.ps1 也复制到项目里（建议放 <项目根>/scripts/）。
+#
+# 设计说明：
+#   - 闸门脚本**零依赖**即可跑（只用 git/python/node），所以在 CI 上开箱可用。
+#   - 专业工具（gitleaks / semgrep / pip-audit / ruff）**未安装则自动 SKIP 并打印安装命令**，
+#     不会因为"没装工具"而假装通过。
+#   - 默认 **normal 模式**：SKIP 不算失败，但会在摘要里明确提示"覆盖不完整"。
+#     想让 SKIP 也算失败，把下面 GATE_MODE 改成 strict。
+#   - 想提高覆盖：取消下方「可选工具」段的注释即可（会让 CI 变慢）。
+#
+# ⚠️ **平台说明（2026-09-13，独立复审第 ④ 条）**：
+#   闸门脚本是在 **Windows PowerShell 5.1** 上开发与验证的（本库自己的 `verify-ps1.mjs`
+#   专门防"编辑器吃掉 BOM"这类 5.1 的坑）。而 `ubuntu-latest` 上跑的是 **pwsh 7** ——
+#   两者在编码、模块路径、`$env:` 细节上并不完全等价（实测踩过：中文经管道在 5.1 下会变乱码）。
+#   所以本模板**同时提供两个作业**：
+#     · `gate-windows`：用 `shell: powershell`（5.1），与本地验证过的环境一致 —— **以它为准**
+#     · `gate-linux`：用 `shell: pwsh`（7），**用来诚实暴露"跨平台能不能跑"**
+#   如果 `gate-linux` 红了，不要急着删它 —— 那说明模板与脚本确实不匹配，
+#   要么把 Linux 那条改成 windows-latest，要么把脚本真正做成跨平台（那是另一个工程）。
+#   把这条写在这里，是为了让"不对称"变成一个**看得见的失败**，而不是一个静默的假设。
+
+name: quality-gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # normal = SKIP 不计失败（推荐先用这个）；strict = SKIP 也算失败
+  GATE_MODE: normal
+
+jobs:
+  # ── 以它为准：与本地验证过的 PowerShell 5.1 一致 ────────────────────────
+  gate-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          # gitleaks 需要完整历史才能扫到旧提交里的密钥
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+
+      # ⚠️ Node 也要装（第六轮复审 S4）：闸门的 B2 是 `npm audit`，而它**只在项目里有
+      #    package.json 时才跑**。旧模板只 setup-python ⇒ Node 类项目复制这份模板之后，
+      #    **依赖审计在 CI 里永远不会跑**，而 README 承诺的是"不会因为没装工具而假装通过"。
+      #    镜像上 npm 通常自带，但那是"碰巧有"，不是"模板声明了" —— 显式声明才可复现。
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22"
+
+      - name: Quality gate
+        shell: powershell
+        run: |
+          $strict = if ($env:GATE_MODE -eq 'strict') { '-Strict' } else { @() }
+          .\scripts\quality-gate.ps1 -Path . -Json gate-report.json @strict
+          exit $LASTEXITCODE
+
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: gate-report-windows
+          path: gate-report.json
+          if-no-files-found: ignore
+
+  # ── 诚实暴露跨平台差异：跑得通很好，跑不通就说明这个模板不能这么用 ────────
+  gate-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+
+      # ⚠️ Node 也要装（第六轮复审 S4）：闸门的 B2 是 `npm audit`，而它**只在项目里有
+      #    package.json 时才跑**。旧模板只 setup-python ⇒ Node 类项目复制这份模板之后，
+      #    **依赖审计在 CI 里永远不会跑**，而 README 承诺的是"不会因为没装工具而假装通过"。
+      #    镜像上 npm 通常自带，但那是"碰巧有"，不是"模板声明了" —— 显式声明才可复现。
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22"
+
+      # ── 可选工具：取消注释以提高覆盖（会让 CI 变慢） ──────────────────
+      # - name: Install optional gate tools
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     pip install pip-audit ruff
+      #     # semgrep 首次运行会下载规则集，较慢
+      #     pip install semgrep
+      # - name: Install gitleaks
+      #   run: |
+      #     curl -sSL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_linux_x64.tar.gz \
+      #       | tar -xz gitleaks
+      #     sudo mv gitleaks /usr/local/bin/
+
+      # ── 项目自身的测试 ──────────────────────────────────────────────
+      - name: Install project deps
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+
+      - name: Run tests
+        run: |
+          if [ -d tests ]; then python -m pytest tests/ -q; else echo "no tests/ directory, skipped"; fi
+
+      - name: Quality gate
+        shell: pwsh
+        run: |
+          $strict = if ($env:GATE_MODE -eq 'strict') { '-Strict' } else { @() }
+          ./scripts/quality-gate.ps1 -Path . -Json gate-report.json @strict
+          exit $LASTEXITCODE
+
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: gate-report-linux
+          path: gate-report.json
+          if-no-files-found: ignore

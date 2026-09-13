@@ -1,0 +1,263 @@
+{
+  "_why": "本体系里'关于它自己的数字'过去散落在文档里，谁都不知道下一个新数字该不该有护栏——于是'文档腐烂'已经犯过 4 次（13/14 项、44/80 项、25 个技能没装、脚本清单漏项）。这份登记表是**唯一的地方**：新增一个关于体系自身的事实数字，就在这里加一条；check-consistency.mjs 会拿它去核对文档，并拦住'没登记的体系数字'。",
+  "_why_anchors": "**为什么要 anchors（2026-09-12 结构性升级）**：旧版每条 claim 只有一个正则 + 一个命中计数，于是**把措辞一改，这条声明就从检查器视野里消失**——实测把 README 的「技能总览（36 个）」改成「技能总览：共 36 个」、再改成 35，检查器**全绿**；加'整条 fact 至少命中一次'也没用，因为同一个正则还在**同一文件的另一行**（第 192 行的安装脚本注释「把 36 个技能打平安装」）命中。真正的修法是：**每条声明锚定到具体文件的某个行特征**。",
+  "_how_to_add": "加一条：{ id, 说明, claim: 从文档里抓声明的正则（**必须有一个捕获组**）, truth: 真值来源（见 truthSources）, noun: 用于'未登记数字'扫描的名词, anchors: [{ file, witness }] }。witness 是**该行的稳定子串**（去掉会变的数字本身），用来把声明钉死在某一行。",
+  "_anchors_rules": "check-consistency.mjs 对 anchors 有四条硬规则，缺一条就 FAIL：① 每个 (file, witness) 必须**恰好解析到一行**（0 行 = 声明被删/被改写；≥2 行 = witness 不够独特）；② 该行必须**自己能被 claim 正则匹配**（否则声明被改写成了别的措辞）；③ **每个文件里 claim 的命中数必须恰好等于该文件登记的 anchor 数**，例外见下；④ 文件里出现的数字必须等于 truth。",
+  "_rule3_exception": "**第③条的例外（措辞与代码已对齐，2026-09-13）**：多出来的命中**分两种**——① 用的是**没登记的数值** → FAIL（「没登记的声明」就指这种）；② 只是**复用了已登记的数字**（例如另一处也写「技能总览（36 个）」，而 36 确实登记在这条 fact 的 noun 下）→ **放行**，只在摘要里计数提示。为什么放行：那是正常行文/合法重复，一律报红会逼人每写一句就去改登记表（独立复审实测的「误报摩擦」）。**注意边界**：这里只保证「数字没有说谎」，不保证「这句话不该重复」——后者是文字质量问题，不是本表的职责。",
+  "_maintenance": "改文档措辞、或新增一处'关于体系自身的数字'，**都要改这里** —— 这就是本机制存在的意义：不许悄悄多一句、也不许悄悄少一句。反过来，**真值算不出来**（truth 指向不存在的来源）同样 FAIL。",
+  "truthSources": {
+    "skills.total": "数 engineering/ 与 productivity/ 下含 SKILL.md 的目录",
+    "skills.engineering": "同上，只看 engineering/",
+    "skills.productivity": "同上，只看 productivity/",
+    "skills.selfAuthored": "下面 selfAuthoredSkills 数组的长度（并逐个核对目录存在）",
+    "scripts.count": "根目录 *.ps1/*.mjs + scripts/ 下全部文件（不含点文件）",
+    "checks.qualityGateTotal": "quality-gate.ps1 里不同的 Add-Result id 个数",
+    "checks.qualityGateDefault": "同上，减去需要 -IncludeTests 才跑的 E1",
+    "checks.redline": "redline-check.ps1 里 Sect 出来的检查项数",
+    "checks.selfTest": "self-test.mjs 里的用例条数",
+    "checks.verifyAll": "verify-all.mjs 的 steps 条数（它一共跑几个检查器）"
+  },
+  "selfAuthoredSkills": [
+    "multi-agent-squad",
+    "commercial-squad",
+    "product-validation",
+    "pricing-and-monetization",
+    "tech-selection",
+    "fullstack-delivery",
+    "production-readiness",
+    "payment-and-billing",
+    "launch-and-ops",
+    "growth-and-analytics"
+  ],
+  "facts": [
+    {
+      "id": "skill-total",
+      "说明": "技能总数（README 正文标题 / README 安装注释 / SKILLS.md 合计行 / 入口文档'不要背'）",
+      "claim": "(?:技能总览（|合计\\s*|把\\s*|不要背\\s*)(\\d+)\\s*个",
+      "truth": "skills.total",
+      "noun": "个技能",
+      "anchors": [
+        {
+          "file": "README.md",
+          "witness": "## 二、技能总览（"
+        },
+        {
+          "file": "README.md",
+          "witness": "# 把 36 个技能打平安装到 DSH 技能根"
+        },
+        {
+          "file": "SKILLS.md",
+          "witness": "**合计 "
+        },
+        {
+          "file": "从这里开始.md",
+          "witness": "不要背 "
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "group-engineering",
+      "说明": "工程技能数（README 仓库结构树）",
+      "claim": "工程技能（(\\d+) 个）",
+      "truth": "skills.engineering",
+      "noun": "个技能",
+      "anchors": [
+        {
+          "file": "README.md",
+          "witness": "工程技能（"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "group-productivity",
+      "说明": "通用工作流技能数（README 仓库结构树）",
+      "claim": "通用工作流技能（(\\d+) 个）",
+      "truth": "skills.productivity",
+      "noun": "个技能",
+      "anchors": [
+        {
+          "file": "README.md",
+          "witness": "通用工作流技能（"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "self-authored",
+      "说明": "自研技能数（以本文件 selfAuthoredSkills 名单为准）",
+      "claim": "编排与商业落地（(\\d+) 个",
+      "truth": "skills.selfAuthored",
+      "noun": "个技能",
+      "anchors": [
+        {
+          "file": "README.md",
+          "witness": "编排与商业落地（"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "script-count-cn",
+      "说明": "入口文档标题里的脚本总数（中文数字；**全角/中文数字同样要能解析**）",
+      "claim": "、\\s*([一二三四五六七八九十]{2,}|\\d+)\\s*个脚本",
+      "truth": "scripts.count",
+      "noun": "个脚本",
+      "anchors": [
+        {
+          "file": "从这里开始.md",
+          "witness": "个脚本，一句话各自干什么"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "gate-count-total",
+      "说明": "quality-gate 全部检查项数（README 命令注释 / 入口文档脚本表）",
+      "claim": "(?:加固全审（|^#\\s*)(\\d+)\\s*项",
+      "truth": "checks.qualityGateTotal",
+      "noun": "项检查",
+      "anchors": [
+        {
+          "file": "README.md",
+          "witness": "项检查（默认跑 "
+        },
+        {
+          "file": "从这里开始.md",
+          "witness": "加固全审（"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "gate-count-default",
+      "说明": "quality-gate 默认跑的检查项数（不含需 -IncludeTests 的 E1）",
+      "claim": "(\\d+)\\s*项[）)]",
+      "truth": "checks.qualityGateDefault",
+      "noun": "项检查",
+      "anchors": [
+        {
+          "file": "从这里开始.md",
+          "witness": "不测则 "
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "redline-count",
+      "说明": "技术红线检查项数（入口文档 / production-readiness 正文）",
+      "claim": "(?:红线\\s*|技术红线审查\\D{0,4})(\\d+)\\s*项",
+      "truth": "checks.redline",
+      "noun": "项红线",
+      "anchors": [
+        {
+          "file": "从这里开始.md",
+          "witness": "**红线 "
+        },
+        {
+          "file": "engineering/production-readiness/SKILL.md",
+          "witness": "**技术红线审查**（"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "self-test-cases",
+      "说明": "检查器自检的用例条数（真值 = self-test.mjs 里 CASES 的条数）。它由**那一行源码注释**持有并核对——注释会被改动，所以它同样要锚定 + 核对。（facts 支持 `excludeLines`：当一条声明会被**测试用例的输入文本**原样命中时用它排除那几行；本 fact **不需要**它——claim 已经窄到只有那一行能命中。复审指出旧说明写着「它排掉了…」而字段并不存在，已改。）",
+      "claim": "个用例全在测别的脚本",
+      "noNumber": true,
+      "childTruthOf": "scripts/self-test.mjs",
+      "说明2": "这条声明**只锚定 + 只核对真值**，不比对行内数字：那一行写的是「十四 个用例」，是**当时的历史记录**（写那句注释的时候确实是 14 条），不是当前值。真值核对的意义是：**加删用例后 truth 会变，而这个真值来源本身也会被这条声明检查**（见 facts-integrity / truth-source 覆盖检查）。",
+      "truth": "checks.selfTest",
+      "noun": "个用例",
+      "anchors": [
+        {
+          "file": "scripts/self-test.mjs",
+          "witness": "个用例全在测别的脚本"
+        }
+      ]
+    },
+    {
+      "id": "verify-all-count",
+      "说明": "verify-all 收敛的检查器个数（入口文档里那句「六个检查器」）。**这条用的是中文数字**，所以它同时是 V3 的活体回归：把「六个」写成「九十九个」，unregistered-facts 必须拦。",
+      "claim": "([一二三四五六七八九十]+|\\d+)\\s*个检查器",
+      "truth": "checks.verifyAll",
+      "noun": "个检查器",
+      "anchors": [
+        {
+          "file": "从这里开始.md",
+          "witness": "六个检查器"
+        }
+      ],
+      "enforced": true
+    },
+    {
+      "id": "self-test-inventory",
+      "说明": "入口文档脚本表里 self-test 这一行（只锚定行，防止这行被删掉后没人发现）",
+      "claim": "`self-test\\.mjs`",
+      "truth": "checks.selfTest",
+      "noun": null,
+      "noNumber": true,
+      "anchors": [
+        {
+          "file": "从这里开始.md",
+          "witness": "`self-test.mjs` 只能证明"
+        },
+        {
+          "file": "从这里开始.md",
+          "witness": "| `self-test.mjs` |"
+        }
+      ]
+    },
+    {
+      "id": "hook-selftest-count",
+      "说明": "提交钩子提示语里的自检条数。这个文件没有扩展名，不进 ALL_MD / ALL_CODE / 脚本清单—— 独立复审实测：往里写错条数，全库没有任何检查看得见；而它每次提交都会打印给用户看。后来又发现「写死数字」本身是坏设计（一小时内漂了两次：34→36→37→38），于是钩子改成运行时现算（grep -c 数 self-test.mjs 的用例名）。所以这条声明现在核对的是「现算方式」而不是数字：claim 锚定那行 grep，确保现算这件事本身还在、且数的是同一个东西（改坏了 → 红）。",
+      "claim": "grep -c '\\^    name: \"'",
+      "truth": "checks.selfTest",
+      "noun": null,
+      "anchors": [
+        {
+          "file": ":root:scripts/git-hooks/pre-commit",
+          "witness": "ST_COUNT=$(grep -c"
+        }
+      ],
+      "noNumber": true,
+      "childTruthOf": ":root:scripts/git-hooks/pre-commit"
+    }
+  ],
+  "extraValues": {
+    "_why": "registeredNumbers 里**不由任何 fact 的真值派生**的数值必须写在这里，并写清理由。",
+    "_rule": "check-consistency 会核对：registeredNumbers 里每个数字，要么等于某条同名 fact 的真值（自动派生），要么在 extraValues 里有理由。**没有第三条路** —— 以前这里是一份手抄的真值副本，删掉一个数字没人发现（复审抓到的 V4 另一面）。"
+  },
+  "registeredNumbers": {
+    "_why": "按'数字+名词'登记允许出现在文档里的体系数字。任何**没登记**的组合都会被 check-consistency 拦下——这就是'新增数字必须登记'的机制。",
+    "_notes": "0 也登记：'根下没有 SKILL.md 时得到 0 个技能'是场景描述，不是对体系规模的声明。**中文数字与全角数字会被规范化后按同一张表核对**（九十九 = 99，１５ = 15）——旧版对它们零防护。",
+    "_limitation": "**已知局限（如实记）**：这份扫描只认**这里登记过的名词**。写一个没登记的新名词（例如「九十九个门禁」）它**看不见**——因为放宽成「任何量词+任意名词」会把中文散文全部打成误报（实测：本库有 800+ 处「一个人」「三条铁律」「一次性」这类自然语言）。所以新增一类体系数字时，**名词本身也要登记在这里**，否则那道护栏不成立。这是本轮明确留下的洞，不是「忘了」。",
+    "_note_个检查器": "「个检查器」现在是**真有护栏**的名词（verify-all-count：真值来自 verify-all.mjs 的 steps 条数，锚点是入口文档那句「六个检查器」）。之前它被登记成 registeredNumbers 里一个没人用的名字，属于'登记了却没人扫'的假安心。",
+    "个技能": [
+      36,
+      29,
+      7,
+      10
+    ],
+    "个脚本": [
+      18
+    ],
+    "项检查": [
+      15,
+      14
+    ],
+    "项红线": [
+      4
+    ],
+    "个用例": [
+      57
+    ],
+    "个检查器": [
+      6
+    ]
+  },
+  "_rangeRule": "小于 smallNumberThreshold（默认 10）的数字被当作**叙述性小数字**（「先装 2 个技能试试」「0 个致命问题」），不要求在 registeredNumbers 里登记；**两位数以上的数字必须登记**（那才是'关于体系规模的精确声明'）。为什么这样做：白名单式登记会把正常行文变成违规，写一句散文就要改登记表 —— 实测被独立复审点名为'误报摩擦'。",
+  "smallNumberThreshold": 10
+}

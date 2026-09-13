@@ -1,0 +1,28 @@
+{
+  "version": "1",
+  "project": "bad-state-fixture",
+  "tier": "tech",
+  "phase": "idea",
+  "node": "n/a",
+  "artifacts": {
+    "er_diagram": false,
+    "state_diagram": false,
+    "interface_contract": false
+  },
+  "redline": {
+    "data_source_ok": { "confirmed": "true", "at": null, "note": "\u8fd9\u6761\u662f\u6545\u610f\u7684\uff1a\u5b57\u7b26\u4e32\u4e0d\u662f\u5e03\u5c14" },
+    "no_redistribute": { "confirmed": false, "at": null, "note": "" }
+  },
+  "gates": {
+    "tech_redline": { "passed": false, "at": null, "evidence": "" },
+    "g1": { "passed": false, "at": null, "evidence": "" },
+    "g2": { "passed": false, "at": null, "evidence": "" },
+    "g3": { "passed": false, "at": null, "evidence": "" },
+    "g4": { "passed": false, "at": null, "evidence": "" }
+  },
+  "blockers": [],
+  "deadline": null,
+  "updated_at": "2026-09-13T00:00:00+08:00",
+  "updated_by": "lead",
+  "history": []
+}

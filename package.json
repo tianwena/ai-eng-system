@@ -1,0 +1,14 @@
+{
+  "name": "ai-eng-system-verify",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "本仓库自身的检查器（validate-skills / verify-all 等）需要一个 YAML 解析器。**为什么不用手写解析**：validate-skills 的全部价值在于用 DSH 真正用的那个解析器去判——手写的宽松解析会把 DSH 会拒绝的技能判成合格，那就是闸门撒谎。",
+  "scripts": {
+    "verify": "node scripts/verify-all.mjs",
+    "verify:fast": "node scripts/verify-all.mjs --fast"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}

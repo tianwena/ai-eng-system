@@ -1,0 +1,29 @@
+# 质量闸门与体检的生成物
+_skillcheck.txt
+_report.txt
+gate-report.json
+
+# 工具临时产物
+_*.mjs
+_*.ps1
+_*.txt
+*.bak
+*.tmp
+
+# Node 依赖（只有一个 yaml，给 validate-skills 用）
+# 提交 package.json + package-lock.json，不提交 node_modules —— CI 用 npm ci 还原。
+node_modules/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python（本库主要是 markdown/脚本，但防误建）
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.coverage
+.ruff_cache/

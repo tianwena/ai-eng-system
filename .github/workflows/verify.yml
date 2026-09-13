@@ -1,0 +1,43 @@
+# 本仓库自身的 CI —— 跑"库完整性"检查，不跑任何项目闸门。
+#
+# 为什么要有它：检查器此前只活在**本机的 git 钩子**里（可被 `--no-verify` 绕过、换台机器就没有）。
+# CI 是唯一**不依赖自觉、不依赖本机状态**的那一层。
+#
+# 为什么是 windows-latest：
+#   · 检查器要调 `powershell.exe` 做 .ps1 语法解析（`verify-ps1.mjs`）——这是 Windows 专有；
+#   · 自检里也有一条用例要跑 `quality-gate.ps1`。
+#   在 ubuntu 上得改成 pwsh 且语法解析路径不同 —— 那是另一套维护面，不值当。
+#
+# 本地等价命令（不用等 CI）：node scripts/verify-all.mjs
+name: verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      # ⚠️ **钉到 commit SHA，不用可变 tag**（`@v4` 是可变引用：上游改了 tag 指向，
+      #    你的 CI 就会执行没审过的代码）。semgrep 的 `github-actions-mutable-action-tag`
+      #    规则一直在报这一条 —— 那是**真问题**，不是误报。
+      # 版本写在注释里，升级时改 SHA + 改注释。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '22'
+
+      # npm ci（不是 install）：锁文件在，构建可复现。
+      # 依赖只有一个 yaml —— validate-skills 必须用**真解析器**，
+      # 手写的宽松解析会把 DSH 会拒绝的技能判成合格（那是闸门撒谎）。
+      - name: Install the one dependency
+        run: npm ci --no-audit --no-fund
+
+      # 五个检查器一次跑完：技能 frontmatter / .ps1 BOM+语法 /
+      # 内容一致性 / 速查卡漂移 / 检查器自检（变异测试）。
+      # 注意：CI 上没有技能根，所以"源↔已装副本"那一项会诚实 SKIP。
+      - name: Verify library integrity
+        run: node scripts/verify-all.mjs
