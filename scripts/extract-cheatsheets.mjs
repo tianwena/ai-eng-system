@@ -12,11 +12,31 @@
 //   本检查把技能里带警告/修正语气的行（"别把…""不是…""⚠️"）当作"热点"，
 //   再确认这些关键短语在速查卡里仍然对得上；对不上就报漂移。
 import { readFile, writeFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REF = "D:\\AIworkspace\\ai-eng-system";
+// ── 路径**一律相对本脚本**，不许写死机器路径 ────────────────────────────────
+// **为什么必须这样（2026-09-13 CI 首次运行实测红）**：
+//   原来这里是 `const REF = "…"` —— 写死的是**我本机上库的绝对路径**（`D:\…\ai-eng-system`）。
+//   本机跑 `verify-all` 永远是绿的（那个目录真的存在），**而 CI 里 checkout 在
+//   `D:\\a\\ai-eng-system\\ai-eng-system`** ⇒ `--check` 读不到速查卡 ⇒
+//   打 `[FAIL] 速查卡.md 不存在` —— 而仓库里 `速查卡.md` 明明在、也被 git 跟踪。
+//   ⚠️ 更坏的是它**骗过了 `verify-clean-clone.mjs`**：那个脚本专门在"干净克隆"里跑
+//   verify-all，本该抓住这类"脚本偷偷读本机"的问题，但脚本读的是写死的本机路径 ⇒
+//   克隆在临时目录里也一样"通过"。**判据指向了克隆之外的地方，克隆再干净也证明不了什么。**
+//   教训（写给以后）：只要一个脚本要跨机器跑，它的输入就只能是"它自己的位置 + 参数 + 环境"。
+const HERE = dirname(fileURLToPath(import.meta.url));
+// 覆盖方式沿用库内既有约定：`--ref`（同 verify-clean-clone.mjs）/ `--installed`（同 verify-all.mjs）。
+// ⚠️ **不要**自造 `DSH_*` 名字：那是宿主（DSH）自己的命名空间（`DSH_HOME`/`DSH_SESSION_ID`… 都是它管的），
+//    撞上去就是"某天宿主定义了一个同名变量、脚本行为悄悄变了"这类看不见的耦合。
+const getArg = (flag) => {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : null;
+};
+const REF = resolve(getArg("--ref") ?? join(HERE, ".."));
 const ENG = join(REF, "engineering");
-const ROOT = "C:\\Users\\A\\.dsh\\skills";
+// 已安装技能根：**只有 `--write` 的"同步回技能根"用到它**，没给就跳过（不再猜机器路径）。
+const ROOT = getArg("--installed") ?? (process.env.DSH_HOME ? join(process.env.DSH_HOME, "skills") : null);
 const MODE = process.argv.includes("--write") ? "write"
   : process.argv.includes("--check") ? "check"
   : "dry";
@@ -26,7 +46,13 @@ if (MODE === "check") {
   const cheatsheetPath = join(REF, "速查卡.md");
   let sheet;
   try { sheet = await readFile(cheatsheetPath, "utf8"); }
-  catch { console.log("[FAIL] 速查卡.md 不存在"); process.exit(1); }
+  catch (e) {
+    // ⚠️ 报错必须**点名它在找哪个文件**：CI 首跑时这里只打"速查卡.md 不存在"，
+    //    而仓库里那个文件明明在、也被跟踪 —— 一句话把排查带到了错方向（差点去查
+    //    .gitattributes/checkout）。带上路径，这类"脚本读错了地方"当场就能看出来。
+    console.log(`[FAIL] 速查卡.md 不存在（找的是：${cheatsheetPath}） ${e.code ?? e.message}`);
+    process.exit(1);
+  }
 
   // 技能正文里"带修正/警告语气"的关键短语 —— 这些最可能在速查卡里留下旧版本
   const HOT = [
@@ -77,6 +103,8 @@ const skills = (await readdir(ENG, { withFileTypes: true }))
 
 const sections = [];
 const report = [];
+const syncFailed = [];
+let syncSkipped = false;
 
 for (const name of skills) {
   const p = join(ENG, name, "SKILL.md");
@@ -104,8 +132,13 @@ for (const name of skills) {
     while (kept.length && kept[kept.length - 1].trim() === "") kept.pop();
     const out = kept.join(eol) + eol;
     await writeFile(p, out, "utf8");
-    // 同步到技能根
-    try { await writeFile(join(ROOT, name, "SKILL.md"), out, "utf8"); } catch { }
+    // 同步到已安装技能根：**只有设了 DSH_SKILLS_ROOT 才做**。
+    // 没设时**明说跳过**（旧版是 `catch { }` —— 写失败也一声不吭，"静默跳过"正是本库
+    // 反复在修的毛病：没发生的事必须说出来）。
+    if (ROOT) {
+      try { await writeFile(join(ROOT, name, "SKILL.md"), out, "utf8"); }
+      catch (e) { syncFailed.push(`${name}: ${e.code ?? e.message}`); }
+    } else { syncSkipped = true; }
   }
   report.push(`  ${MODE === "write" ? "[已抽取]" : "[待抽取]"} ${name.padEnd(24)} 移除 ${removed} 行，保留速查 ${body.length} 行`);
 }
@@ -141,4 +174,11 @@ if (MODE === "write") await writeFile(join(REF, "速查卡.md"), doc, "utf8");
 console.log(report.join("\n"));
 console.log("");
 console.log(`合计 ${sections.length} 个技能，速查卡文档 ${doc.split("\n").length} 行`);
-console.log(MODE === "write" ? ">>> 已写入（SKILL.md 已精简 + 速查卡.md 已生成）" : ">>> 预演模式（加 --write 才写入）");
+if (MODE === "write") {
+  // 同步结果**必须报出来**（成功/跳过/失败三档，不一锅端成"已写入"）
+  if (syncFailed.length > 0) console.log(`⚠️  已写入本库，但同步到技能根失败 ${syncFailed.length} 个：${syncFailed.join("；")}`);
+  else if (syncSkipped) console.log("（未设置 DSH_SKILLS_ROOT —— **跳过**同步到已安装技能根，本库内的文件已更新）");
+  else console.log(">>> 已写入（SKILL.md 已精简 + 速查卡.md 已生成 + 已同步到技能根）");
+} else {
+  console.log(">>> 预演模式（加 --write 才写入）");
+}

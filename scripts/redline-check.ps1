@@ -37,7 +37,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
-$root = (Resolve-Path -LiteralPath $Project).Path
+# ⚠️ **必须用 `Get-Item` 的 `.FullName`，不能用 `Resolve-Path` 的 `.Path`**（2026-09-13 CI 首跑红的根因）：
+#    `Resolve-Path` 会**原样保留**传进来的 **8.3 短名**（本机实测：`-Project C:\Users\<你>\A-VERY~1`
+#    → `$root` 就是 `…\A-VERY~1`），而 `Get-Item` / `Get-ChildItem` 给的是**长名**。
+#    下游 `Join-Path $root …`（用于 $trackedFull）与 `$f.FullName`（工作区枚举）于是指向
+#    **同一个文件却字符串不相等** —— 差的是 `RUNNER~1` vs `runneradmin` 这种，大小写不敏感也救不了。
+#    后果：同一个文件被判红一次（"已跟踪"那轮），又被当"未跟踪"再扫一遍 ⇒ 自相矛盾 + 重复计数。
+#    这正是 CI 的现象：GitHub Windows runner 的 `TEMP` 形如 `C:\Users\RUNNER~1\…`，
+#    自检夹具建在它下面 ⇒ **本机全绿、CI 红**（本机临时目录在长名下，永远碰不到）。
+#    ⇒ 判据：路径一律从**同一个 API 家族**取（provider：Get-Item / Get-ChildItem），不靠字符串拼接。
+try { $root = (Get-Item -LiteralPath $Project -ErrorAction Stop).FullName }
+catch { Write-Host "[FAIL] 项目目录不存在或读不到：$Project" -ForegroundColor Red; exit 1 }
 $fail = [System.Collections.Generic.List[string]]::new()
 $warn = [System.Collections.Generic.List[string]]::new()
 $info = [System.Collections.Generic.List[string]]::new()
@@ -122,7 +132,10 @@ $goneCount = 0
 #   · **未跟踪/被忽略**的文件 → **警告**（`.env` 本来就该放密钥，是不是问题取决于
 #     "这目录会不会被打包/同步/上传"——那是人的判断，机器不该替人定）
 $skipRe = '\\(\.git|node_modules|\.venv|venv|__pycache__|\.ruff_cache|\.mypy_cache|\.pytest_cache|dist|build|\.next|\.idea|\.vscode)\\+'
-$wsAll = @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue)
+# ⚠️ `\.git\` 在这里**显式**排掉（不再只靠"不带 -Force 就不会枚举隐藏目录"这个实现细节）：
+#    `.git/index`、`.git/logs/…` 这些既不是"被跟踪的源文件"也不是"未跟踪的源文件"，
+#    落在任何一轮扫描的语义之外；而"谁的枚举更宽"是 PS 版本相关的，不该变成判据的一部分。
+$wsAll = @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\\.git\\' })
 # ⚠️ 排除 `\.git\` 只是**防御性**的：实测 `Get-ChildItem -Recurse`（不带 -Force）
 #    根本不会枚举隐藏目录，所以 `.git` 里的文件从来就没进过这个计数。
 #    （我一度以为本库自报的那 241 个"依赖/产物目录"全是 `.git` 里的东西，**那是瞎猜**——
@@ -159,13 +172,32 @@ if (Test-Path (Join-Path $root '.git')) {
     $suspect = @($tracked | Where-Object { $_ -match '(^|/)(\.env($|\.)|.*\.pem$|.*\.key$|id_rsa|credentials(\.json)?$)' -and $_ -notmatch '\.example$|\.sample$|\.template$' })
     if ($suspect.Count -gt 0) { $fail.Add("被跟踪的敏感文件: $($suspect -join ', ')") }
 
+    # ── "已经扫过的文件"这张表：**必须在下面那轮扫描之前建好** ────────────────
+    # 两道判据都要（2026-09-13 独立复审第三轮 + CI 首跑各照出一次）：
+    #    ① `OrdinalIgnoreCase`：`git ls-files` 的路径与磁盘上的路径**只差大小写**时
+    #       （`leakdir/leak.py` vs `LeakDir\leak.py`，NTFS 大小写不敏感、`git status` 干净），
+    #       默认的序数比较会认不出是同一个文件。
+    #    ② **不能只靠 `Join-Path` 拼字符串**：同一个目录的**短名/长名**写法不是"大小写差异"，
+    #       序数不敏感也判不出来。所以下面扫每个被跟踪文件时会顺手登记它的
+    #       **provider 规范路径**（`.FullName`）；这里的 `Join-Path` 形态是兜底。
+    #       CI 首跑红的根因就是缺 ②（详见文件开头 $root 那段）。
+    # ⚠️ 声明位置很关键：它**先**被"已跟踪"那轮写、再被"未跟踪"那轮读。
+    #    放在读的那一轮旁边（原来的写法）在 `Set-StrictMode -Version Latest` 下会直接抛异常。
+    $trackedFull = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($t in $tracked) { [void]$trackedFull.Add((Join-Path $root ($t -replace '/', '\'))) }
+
     # 明文密钥模式：**反向列**（只排除二进制/资源，见上面的 $BINARY_RE）
     $files = @($tracked | Where-Object { $_ -notmatch $BINARY_RE })
     $hits = [System.Collections.Generic.List[string]]::new()
     $trackedLarge = 0
     foreach ($f in $files) {
       if (-not (Test-Path -LiteralPath $f)) { $goneCount++; continue }
-      $len = (Get-Item -LiteralPath $f -ErrorAction SilentlyContinue).Length
+      # ⚠️ 顺手把**规范路径**（provider 给的 `.FullName`）登记进 $trackedFull —— 见 $root 那段。
+      #    只登记 `Join-Path $root …` 拼出来的字符串是不够的：短名/长名这种差异拼不出来。
+      #    这里本来就要 `Get-Item` 取文件大小，所以**零额外开销**。
+      $fi = Get-Item -LiteralPath $f -ErrorAction SilentlyContinue
+      if ($null -ne $fi) { [void]$trackedFull.Add($fi.FullName) }
+      $len = if ($null -ne $fi) { $fi.Length } else { $null }
       # 超 2MB 的被跟踪文件在这里跳过。⚠️ **不要**把这个计数再加进 $skippedLarge：
       # `$skippedLarge` 来自工作区枚举（`Get-ChildItem`，它不认识 git），**本来就包含**
       # 被跟踪的大文件。第四轮复审提的 F4 说"$trackedLarge 是死变量、那个文件不在任何计数里"
@@ -190,14 +222,9 @@ if (Test-Path (Join-Path $root '.git')) {
     #    那句"其中 N 个是被跟踪的"补充说明，不再参与计数。）
 
     # ── 未跟踪 / 被忽略的文件：**也扫**（用户裁定；命中记警告，见上面的分档说明）──
-    # ⚠️ HashSet 必须**大小写不敏感**（2026-09-13 第三轮复审实测）：`git ls-files` 的路径与
-    #    磁盘上的路径只差大小写时（`leakdir/leak.py` vs `LeakDir\leak.py`，NTFS 大小写不敏感、
-    #    `git status` 干净），默认的序数比较会认不出是同一个文件 ⇒ 同一个文件**既进硬失败
-    #    又进未跟踪警告**，汇总行说"被跟踪的 1 个文件里未发现"而那个文件刚被判红，
-    #    还谎称"另外扫了 1 个未跟踪/被忽略的文件"（那个文件根本不存在）。Windows 上路径本就
-    #    不区分大小写，判据也必须不区分。
-    $trackedFull = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($t in $tracked) { [void]$trackedFull.Add((Join-Path $root ($t -replace '/', '\'))) }
+    # ⚠️ 这里**不要**重建 `$trackedFull`：它在上面（"已跟踪"那轮之前）建好，并在扫每个被跟踪
+    #    文件时登记了 provider 规范路径。在这里重建 = 把那些规范路径**抹掉**，CI 那个
+    #    "同一个文件被判红两次"就是这么来的（短名/长名对不上）。判据见上面的注释。
     foreach ($f in $wsScan) {
       if ($trackedFull.Contains($f.FullName)) { continue }   # 已跟踪的上面那轮已经硬失败扫过
       $scannedExtra++

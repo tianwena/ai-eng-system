@@ -19,7 +19,7 @@
 //   node scripts/self-test.mjs -v         # 顺带打印每个用例的检查器输出
 //
 // 退出码: 0 = 检查器们行为正确；1 = 有检查器没抓住注入的错误（闸门形同虚设）
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, rmSync, existsSync, renameSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, rmSync, existsSync, renameSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -900,7 +900,7 @@ const CASES = [
       // -Quiet 是**机器通道**，明细截断到 5 条——那就必须把"还有几处没列"说出来
       // （静默截断 = 留了半条后门；而输出里指"完整清单见非 -Quiet"曾经是句假话，已修）。
       if (!/另有 \d+ 处豁免未列出/.test(out3)) problems.push("-Quiet 下豁免明细被静默截断（没有「另有 N 处未列出」）");
-      return { code: problems.length ? 1 : 0, expectCode: 0, out: problems.length ? problems.join("；") : "豁免只作用于标记行：标了放行、没标照红，且豁免条数在普通与 -Quiet 下都被报出" };
+      return { code: problems.length ? 1 : 0, expectCode: 0, raw: `【第一次】\n${out1}\n【第二次（同一文件里加一行没标豁免的）】\n${out2}\n【-Quiet】\n${out3}`, out: problems.length ? problems.join("；") : "豁免只作用于标记行：标了放行、没标照红，且豁免条数在普通与 -Quiet 下都被报出" };
     },
   },
   {
@@ -1119,7 +1119,81 @@ const CASES = [
       if ((r.status ?? 1) !== 1) problems.push(`退出码 ${r.status}（被跟踪文件里有明文密钥，应当 1）`);
       if (/未被跟踪\/被忽略的文件里\s*检出/.test(out)) problems.push("**同一个文件被当成「未跟踪」又报了一遍** —— 路径大小写没对齐（HashSet 大小写敏感）");
       if (/另外扫了 \d+ 个未跟踪/.test(out)) problems.push("谎称扫到了不存在的未跟踪文件（同一个文件被算了两遍）");
-      return { code: problems.length ? 1 : 0, expectCode: 0, out: problems.length ? problems.join("；") : "大小写不一致时只判红一次，没有重复计数与自相矛盾" };
+      return { code: problems.length ? 1 : 0, expectCode: 0, raw: out, out: problems.length ? problems.join("；") : "大小写不一致时只判红一次，没有重复计数与自相矛盾" };
+    },
+  },
+  {
+    name: "速查卡漂移检查读的是**它自己所在的仓库**（不许写死本机路径）",
+    // **为什么加**：CI 首次运行（2026-09-13）红在这里，报的是「速查卡.md 不存在」——
+    // 而那个文件在仓库里、也被 git 跟踪。根因是 `extract-cheatsheets.mjs` 里写着
+    // 一个**写死的本机绝对路径**（形如 `D:\…\ai-eng-system`，脚本压根没用自己所在的位置）：
+    // 本机跑永远绿（那目录真在），CI 里 checkout 在 `D:\\a\\ai-eng-system\\…` ⇒
+    // **它读的是"我的机器"，不是"仓库"**。
+    // ⚠️ 它**骗过了 verify-clean-clone.mjs** —— 那个脚本专门在干净克隆里跑 verify-all，
+    //    本该抓住这类"脚本偷偷读本机"的问题；但判据指向克隆之外时，克隆再干净也证明不了什么。
+    // 判据：把**副本里**的速查卡删掉 ⇒ 必须 FAIL，且报错要点名"它找的是副本里那个路径"。
+    // ⚠️ 把 REF 改回写死的本机路径 ⇒ 这条必须红（本机也一样红：副本删了、本机那份还在 ⇒ 假绿）。
+    check: (d) => {
+      const sheet = join(d, "速查卡.md");
+      if (!existsSync(sheet)) return { code: 0, expectCode: 0, out: "副本里本来就没有速查卡.md —— 本项在本机没有判据，跳过" };
+      const saved = readFileSync(sheet);
+      rmSync(sheet);
+      const r = run(d, "scripts/extract-cheatsheets.mjs", ["--check"]);
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      writeFileSync(sheet, saved);
+      const problems = [];
+      if ((r.status ?? 1) !== 1) problems.push(`退出码 ${r.status}（副本里的速查卡被删了，应当 1 —— 假绿说明它读的不是这个仓库）`);
+      if (!out.includes(sheet)) problems.push("报错没点名它找的是哪个文件（要能看出它读的是副本里的那份）");
+      return { code: problems.length ? 1 : 0, expectCode: 0, raw: out, out: problems.length ? problems.join("；") : "漂移检查读的是它自己所在的仓库（把副本里的速查卡删掉就红）" };
+    },
+  },
+  {
+    name: "路径写成 8.3 短名时也不许自相矛盾（CI 首跑红的根因）",
+    // **为什么加**：GitHub Windows runner 的 `TEMP` 形如 `C:\Users\RUNNER~1\…`，
+    // 而自检夹具建在 `mkdtempSync(os.tmpdir())` 下面 ⇒ 传给 redline 的 `-Project` 是**短名**。
+    // `Resolve-Path` 会**原样保留**短名，`Get-Item`/`Get-ChildItem` 给的是**长名** ⇒
+    // 旧代码用 `Join-Path $root …` 拼出来的 $trackedFull 与磁盘枚举**指向同一个文件却字符串不等**
+    // （差的是 `RUNNER~1` vs `runneradmin`，大小写不敏感也救不了）⇒ 同一个文件被判红一次、
+    // 又被当"未跟踪"扫一遍。CI 上这条一次红**两条断言**，本机 57/57 全绿 —— 典型"只在 CI 现形"。
+    // ⚠️ 本机 D: 卷没开 8.3 短名，测不出来；临时目录在 C:（系统卷，默认开）时能测。
+    //    两条路都走不通时**诚实跳过**，不假装通过。
+    // 判据：只判红一次（退出码 1），且不许出现"未被跟踪/被忽略…检出"与"另外扫了 N 个未跟踪"。
+    // ⚠️ 变异口径（变异 M18 实测，2026-09-13）：**必须两处一起撤回**才红 ——
+    //    redline 的两处修复（$root 取规范路径 / 逐个登记规范路径）**互为冗余**，
+    //    只撤一处时这条用例**仍然是绿的**（57+2 全绿）。我第一次只撤了一处，
+    //    差点得出"这条护栏没用"的错误结论。实测记录：两处都撤回 → 58/59，
+    //    唯一红的就是这条，报出的短名是 `%TEMP%\SE1504~1\tests\fixtures\REDLIN~1`
+    //    —— 与 CI 上 `RUNNER~1` 那种形态同源。
+    check: (d) => {
+      const ps = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      if (!existsSync(ps)) return { code: 0, expectCode: 0, out: "没有 powershell.exe —— 本项跳过（不算失败）" };
+      const proj = join(d, "tests", "fixtures", "redline-shortpath");
+      mkdirSync(proj, { recursive: true });
+      writeFileSync(join(proj, "leak.py"), 'api_key = "abcdefghijklmnopqrstuvwxyz123456"\n', "utf8");  // nosemgrep: generic.secrets.security.detected-generic-api-key.detected-generic-api-key — redline-allow: 自检样例里的假密钥（不是真密钥；两个扫描器共用这一个标记）
+      const git = (args) => spawnSync("git", args, { cwd: proj, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+      git(["init", "-q"]); git(["add", "-A"]); git(["commit", "-qm", "i"]);
+      if (!existsSync(join(proj, ".git"))) return { code: 0, expectCode: 0, out: "本机没有可用的 git —— 本项跳过（不算失败）" };
+      // 取 8.3 短名。⚠️ **不能**用 `spawnSync("cmd.exe", ["/c", 'for %I in ("…") do …'])`：
+      //    经 Node 组命令行后引号会被吃掉（实测拿到 `D:\"C:\…\"` 这种垃圾），必须借 PowerShell 转一层。
+      const shortRaw = (spawnSync(ps, ["-NoProfile", "-Command", `cmd.exe /c "for %I in (""${proj}"") do @echo %~sI"`], { encoding: "utf8" }).stdout ?? "").trim();
+      let probe = null; let why = "";
+      if (shortRaw && shortRaw !== proj) { probe = shortRaw; why = `-Project 用 8.3 短名（${shortRaw}）`; }
+      else {
+        let canon = proj;
+        try { canon = realpathSync.native(proj); } catch { /* 取不到就按原样比 */ }
+        if (canon !== proj) { probe = proj; why = "临时目录本身就在短名路径下（CI 就是这种）"; }
+      }
+      if (!probe) return { code: 0, expectCode: 0, out: "本机的临时目录既拿不到 8.3 短名、本身也不是别名形态 —— 这项在本机没有判据，跳过（CI 上有）" };
+      const fakeHome = join(d, "tests", "fixtures", "fake-home");
+      mkdirSync(fakeHome, { recursive: true });
+      const env = { ...process.env, USERPROFILE: fakeHome, APPDATA: fakeHome, LOCALAPPDATA: fakeHome, PATH: process.env.PATH };
+      const r = spawnSync(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(d, "scripts", "redline-check.ps1"), "-Project", probe], { cwd: d, encoding: "utf8", env });
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      const problems = [];
+      if ((r.status ?? 1) !== 1) problems.push(`退出码 ${r.status}（被跟踪文件里有明文密钥，应当 1）`);
+      if (/未被跟踪\/被忽略的文件里\s*检出/.test(out)) problems.push(`同一个文件既判红又被当「未跟踪」再扫一遍 —— 短名/长名（或大小写）没对齐：${why}`);
+      if (/另外扫了 \d+ 个未跟踪/.test(out)) problems.push("谎称另外扫了未跟踪文件 —— 那个文件就是刚判红的被跟踪文件");
+      return { code: problems.length ? 1 : 0, expectCode: 0, raw: out, out: problems.length ? problems.join("；") : `短名写法下只判红一次，没有重复计数（${why}）` };
     },
   },
   {
@@ -1371,6 +1445,11 @@ for (const c of CASES) {
     // 两种写法：整包断言（基线）或 {r, need, expectCode}
     const code = out.r ? (out.r.status ?? 1) : out.code;
     const text = out.r ? `${out.r.stdout ?? ""}${out.r.stderr ?? ""}` : out.out;
+    // raw = **子进程的原始输出**（用例可以显式给；{r,…} 写法默认就是它）。
+    // ⚠️ 为什么需要它（2026-09-13 CI 首跑）：用例失败时只打印 `out`（我自己写的问题串），
+    //    被检查工具的**真实输出一个字都没进日志** ⇒ 远端红灯无法诊断，只能靠猜。
+    //    CI 里没有交互 shell、日志又要鉴权，所以"失败时把原始输出带出来"是唯一的排查通道。
+    const raw = out.raw ?? (out.r ? text : null);
     const expectCode = out.expectCode;
     // need：输出里必须出现这段文字；needId：必须出现 `[FAIL] <id>`（用来断言"这项红了"）。
     // passId：必须出现 `[PASS] <id>`（用来断言"这项**没红**"——放行类用例需要它，
@@ -1382,9 +1461,16 @@ for (const c of CASES) {
       pass++;
       console.log(`  [OK  ] ${c.name}`);
     } else {
-      failures.push({ name: c.name, code, expectCode, need, text });
+      failures.push({ name: c.name, code, expectCode, need, text, raw });
       console.log(`  [FAIL] ${c.name}`);
       console.log(`         期望退出码 ${expectCode}，实际 ${code}${need ? `；期望输出里含「${need}」，${okText ? "有" : "**没有**"}` : ""}`);
+      // 失败时**总是**带出原始输出（不只 -v）：这是远端（CI）唯一的排查通道，见上面 raw 的注释。
+      if (raw) {
+        const lines = String(raw).split("\n");
+        const tail = lines.length > 20 ? lines.slice(-20) : lines;
+        console.log(`         子进程原始输出（共 ${lines.length} 行${lines.length > 20 ? "，以下是尾部 20 行" : ""}）：`);
+        for (const l of tail) console.log(`         │ ${l}`);
+      }
     }
     if (VERBOSE) console.log(text.split("\n").map((l) => `         │ ${l}`).join("\n"));
   } catch (e) {
