@@ -11,6 +11,10 @@
 # 本地等价命令（不用等 CI）：node scripts/verify-all.mjs
 name: verify
 
+# ⚠️ `run-name` 必须写：不写的话 Actions 的运行标题会**照抄提交信息第一行**，
+#    于是内部口径的措辞会被再显示一遍（运行列表是给人看的门面）。
+run-name: CI：库完整性检查
+
 on:
   push:
   pull_request:
