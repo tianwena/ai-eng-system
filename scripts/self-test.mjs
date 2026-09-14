@@ -122,6 +122,39 @@ const CASES = [
     check: (d) => ({ r: run(d, "scripts/verify-ps1.mjs", ["-Repo", d]), need: "缺 UTF-8 BOM", expectCode: 1 }),
   },
   {
+    name: "编码/行尾体检：BOM 与行尾装反了必须被抓到（新检查器的负向测试）",
+    // **为什么加**：`verify-encoding.mjs`（2026-09-14 由另一个窗口新增）本来**一条用例都没有**，
+    // 而它已经被接进 `verify-all` —— 没有负向测试的检查器进总闸，等于"少项总闸"只保住了它的**存在**，
+    // 保不住它的**判据**（`self-test` 的意义正是后者）。
+    // 判据挑它**独有**、别的检查器管不到的规则（`.ps1` 的 BOM 已被上面那条覆盖）：
+    //   · `.md` **带 BOM** ⇒ 必须报 ERROR（其它检查器只管 `.ps1`）
+    //   · `.bat` 用 **裸 LF** ⇒ 必须报 ERROR（bat 必须 CRLF，否则 cmd 当一行拼）
+    // ⚠️ 变异：把 `RULES` 里 `.md` 的 `bom: "forbidden"` 或 `.bat` 的 `eol: "crlf"` 删掉 ⇒ 这条必须红。
+    // ⚠️ 夹具故意**不**做 `git init`：正好走它那条"非 git 目录 → 目录遍历"兜底分支 ——
+    //    那条分支原本是 `require("node:fs")`（ES module 里没有 require）⇒ 一跑就抛
+    //    `ReferenceError`（2026-09-14 实测），这条用例同时守住那个修复。
+    check: (d) => {
+      const dir = join(d, "tests", "fixtures", "encoding-bad");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "bom.md"), "\uFEFF# 带 BOM 的 md\n", "utf8");          // 不该有 BOM
+      // ⚠️ `.bat` 夹具**必须是纯 ASCII**（用 latin1 写）：第一版用 "ascii" 编码写了一句中文，
+      //    中文被截断成非法字节 ⇒ 触发的是**另一条**规则（"无法按 GBK 严格解码"）⇒
+      //    用例**因为错误的原因而绿**：把 EOL 规则删掉它照样绿（变异 M20 实测抓到的假护栏）。
+      writeFileSync(join(dir, "lf.bat"), "@echo off\nrem must be CRLF\n", "latin1"); // 不该是裸 LF
+      const r = run(d, "scripts/verify-encoding.mjs", ["-Repo", dir]);
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      const problems = [];
+      if ((r.status ?? 1) !== 1) problems.push(`退出码 ${r.status}（两个文件都违规，应当 1）`);
+      // ⚠️ 断言必须钉**报错那一行的形态**（`[ERROR] <文件>`），不能只匹配文件名：
+      //    实测（变异 M20）只写 `/lf\.bat/` 时，把 `.bat` 的 EOL 规则删掉后**这条用例照样绿** ——
+      //    因为输出里"检查 N 个文本文件"之类的行也能碰到那个名字。弱断言 = 假护栏。
+      if (!/\[ERROR\]\s+bom\.md/.test(out)) problems.push("`.md` 带 BOM 没被抓到（期望输出里有 `[ERROR] bom.md`）");
+      if (!/\[ERROR\]\s+lf\.bat/.test(out)) problems.push("`.bat` 用裸 LF 没被抓到（期望输出里有 `[ERROR] lf.bat`）");
+      if (/ReferenceError|require is not defined/.test(out)) problems.push("在非 git 目录下抛异常了（应当走目录遍历兜底，而不是崩栈）");
+      return { code: problems.length ? 1 : 0, expectCode: 0, raw: out, out: problems.length ? problems.join("；") : "BOM 与行尾违规都被抓到，且非 git 目录下正常工作" };
+    },
+  },
+  {
     name: "CONTEXT.md 合规样本 → 硬结构闸门必须放行",
     mutate: (d) => cpSync(join(d, "tests", "fixtures", "tiny-CONTEXT.md"), join(d, "CONTEXT.md")),
     check: (d) => ({ r: run(d, "scripts/verify-structure.mjs", ["-Project", d]), need: "硬结构校验通过", expectCode: 0 }),
@@ -600,7 +633,7 @@ const CASES = [
     //
     // ⚠️ **这条为什么不 spawn PowerShell**（真机实测后改的写法）：
     //    第一版是"跑 state.ps1 然后匹配输出里的中文"。真机输出：
-    //      stdout="? ״̬�����⣺\n   - state: ȱ �����ֶ� version\n …"（乱码）
+    //      stdout="<乱码：控制台代码页不对，中文在这一段里已被替换成 U+FFFD，原文不可恢复>\n   - state: <乱码> version\n …"（乱码）
     //      stderr=""（空）
     //    —— 命令确实跑了、也 exit 1，但那句话在 Node 眼里**不是中文**：
     //    **Windows PowerShell 5.1 往管道写的是控制台代码页（中文系统 GBK/936）的字节，

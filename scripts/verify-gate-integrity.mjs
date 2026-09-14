@@ -51,6 +51,7 @@ const expected = [...new Set(PINNED_GATE_IDS)].sort();
 const PINNED_VERIFY_ALL_STEPS = [
   "技能 frontmatter（写坏 = 技能静默消失） → validate-skills.mjs",
   ".ps1 的 BOM + 语法（编辑器会吃 BOM） → scripts/verify-ps1.mjs",
+  "编码与行尾（.ps1 要 BOM、.bat 要 GBK+CRLF、其余 UTF-8 无 BOM） → scripts/verify-encoding.mjs",
   "内容一致性（文档里的数字/清单/链接/命令 ⇄ 真值） → scripts/check-consistency.mjs",
   "quality-gate 的完整性（不许静默少项 + 与钉住的清单一致） → scripts/verify-gate-integrity.mjs",
   "速查卡漂移（正文改了、速查卡还留旧说法） → scripts/extract-cheatsheets.mjs",

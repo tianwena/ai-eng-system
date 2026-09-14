@@ -136,7 +136,7 @@ Remove-Item -Recurse -Force $probe, $good
 
 ```
 （诊断）status=1 error=无
-（诊断）stdout="? ״̬�����⣺\n   - state: ȱ �����ֶ� version\n …"
+（诊断）stdout="<乱码：控制台代码页不对，中文在这一段里已被替换成 U+FFFD，原文不可恢复>\n   - state: <乱码> version\n …"
 （诊断）stderr=""
 ```
 

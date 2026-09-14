@@ -41,6 +41,13 @@ const steps = [
     cmd: [node, "scripts/verify-ps1.mjs"],
   },
   {
+    // 2026-09-14 新增：`.bat` 要 GBK+CRLF、`.md/.py/.json` 要 UTF-8 无 BOM、
+    // `.ps1` 要 BOM —— 这些规则原本只写在 AGENTS.md 的「编码铁律」表里，靠人不犯；
+    // 实测一天能犯十几次，且症状都不像编码问题（先查逻辑，方向从一开始就错）。
+    name: "编码与行尾（.ps1 要 BOM、.bat 要 GBK+CRLF、其余 UTF-8 无 BOM）",
+    cmd: [node, "scripts/verify-encoding.mjs", "-Repo", "."],
+  },
+  {
     name: "内容一致性（文档里的数字/清单/链接/命令 ⇄ 真值）",
     cmd: [node, "scripts/check-consistency.mjs", ...(INSTALLED && existsSync(INSTALLED) ? ["--installed", INSTALLED] : [])],
   },
@@ -68,7 +75,8 @@ const steps = [
 ];
 // "少项"总闸：上面的清单**必须**是这几步。少一步 = 有人把闸门悄悄摘了。
 // （为什么要有：quality-gate 早就有这条总闸，而**库自己的入口反而没有** —— 复审 V6。）
-const EXPECTED_STEPS = 6;   // 加/删步骤时必须同步改这里 —— 这条总闸抓过我一次（加了闸门完整性那步忘了改计数）
+const EXPECTED_STEPS = 7;   // 加/删步骤时必须同步改这里 —— 这条总闸抓过我一次（加了闸门完整性那步忘了改计数），
+                            // 2026-09-14 又抓到第二次（加"编码与行尾"那步同样忘了改）。**两次都说明它有用，别嫌烦。**
 
 // **$expectedIds 的教训（复审原话：手写的第二份真相源，删掉 E1 那行所有检查器全绿）**：
 // 期望的检查项**不再手抄，也不从源码现算** —— 它**钉在闸门外面**
