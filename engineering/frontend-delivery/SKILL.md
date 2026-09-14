@@ -254,7 +254,7 @@ rg -n 'padding:\s*\d+px|margin:\s*\d+px' src
 |---|---|---|
 | AI 紫渐变当主视觉 | `#8b5cf6` / `violet-5xx` / `from-purple-` | 见下 |
 | 假人假公司 | `Jane Doe` / `John Smith` / `Acme` / `Lorem ipsum` 出现在**要交付的文案**里 | 见下 |
-| z-index 通胀 | `z-index: 999` / `9999` / 四位数 | 见下 |
+| z-index 跳量级 | 出现**四位数以上**的值，且**不在项目自己的层级表里** | 见下 |
 | 动效无节制 | 有动画，却查不到 `prefers-reduced-motion` | 见下 |
 | 主视觉把 CTA 挤出首屏 | CTA 需要滚动才看得到 | Playwright |
 | 主视觉顶部巨空 | 顶部内边距 > 6rem | Playwright |
@@ -265,7 +265,7 @@ rg -n 'padding:\s*\d+px|margin:\s*\d+px' src
 ```powershell
 $src = 'src'   # 换成你的前端源码目录
 Get-ChildItem $src -Recurse -File -Include *.css,*.scss,*.tsx,*.ts,*.jsx,*.js,*.vue,*.html |
-  Select-String -Pattern '#8b5cf6|from-purple-|to-pink-|violet-5|Jane Doe|John Smith|Acme|Lorem ipsum|z-index:\s*[0-9]{3,}'
+  Select-String -Pattern '#8b5cf6|from-purple-|to-pink-|violet-5|Jane Doe|John Smith|Acme|Lorem ipsum|z-index:\s*[0-9]{4,}'
 # 声明了动画却查不到这条 ⇒ 缺（无 prefers-reduced-motion 的动效对前庭敏感人群是伤害，不只是体验问题）
 Get-ChildItem $src -Recurse -File -Include *.css,*.scss | Select-String -Pattern 'prefers-reduced-motion'
 ```
