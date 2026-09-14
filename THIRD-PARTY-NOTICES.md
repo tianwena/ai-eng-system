@@ -51,6 +51,7 @@ SOFTWARE.
 | Martin Fowler，《重构》（Refactoring） | 代码坏味道清单（12 条基线） |
 | John Ousterhout，《软件设计哲学》 | 深模块 / 浅模块、接口与实现复杂度 |
 | Kent Beck | "每天都投资于系统设计"、红-绿-重构 |
+| `Leonxlnx/taste-skill`（MIT，2026-08-24 快照） | "反 AI 塑料味"的可验规则：眉标密度、首屏与导航几何、布局族重复、减动效等。**本库改写为栈无关规则并配上验证命令**（见 `engineering/frontend-delivery/SKILL.md` 第十节），**未复制其文本**；其"必须用图像生成工具"一条**未采纳** |
 
 > 这些为**思想引用**，其著作权归原作者与出版方。本体系不含其原文。
 
