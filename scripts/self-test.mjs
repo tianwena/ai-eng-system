@@ -1507,68 +1507,174 @@ process.on("exit", () => {
 });
 
 // ── 跑 ────────────────────────────────────────────────────────────────────
-let pass = 0;
-const failures = [];
-console.log("=== 检查器自检（变异测试：注入已知错误，断言闸门必须拦住）===\n");
+// ⚠️ **为什么是"分片 + 父进程并发"，而不是 Promise.all**（2026-09-14）：
+//    61 条用例里有 20 条要起 PowerShell，而所有用例用的都是 **`spawnSync`（阻塞主线程）** ——
+//    同一个进程里 await 它们**不会**并行。串行实测 94.3 秒（占全量 verify-all 的 93%）。
+//    实测结论：**用例之间彼此独立**（各自 copyLib 一份副本、各自 spawn 子进程、各写各的目录）
+//    ⇒ 可以把用例切成 N 片、由**父进程并发起 N 个子进程**跑，再把输出按序合并。
+//    这样 61 条用例本体**一行都不用改**（对独立复审友好）。
+// ⚠️ **例外必须独占**：动**控制台代码页**的用例（`chcp` 改的是**整个控制台**的状态）不能与别人并行，
+//    否则它会把同批用例的中文输出改乱 —— 症状是"随机假红"，比慢得多更糟。它单独跑，串行。
+// 实测：串行 92.9s / 2 片 49.8s / 4 片 35.3s / **6 片 32.1s**（2026-09-14，本机 6 核）。
+// 默认取 min(6, 核数-1)：再多也不划算（PowerShell 启动争用），再少则吃不满。
+const SERIAL_RE = /代码页/;
+const serialCases = CASES.filter((c) => SERIAL_RE.test(c.name));
+const parallelCases = CASES.filter((c) => !SERIAL_RE.test(c.name));
 
-for (const c of CASES) {
-  const dir = copyLib();
-  try {
-    // ── 变异必须真的改到东西（见上面 fingerprint 的注释）──
-    // 没有 mutate 的用例（基线、纯静态检查）跳过这道闸门。
-    const before = c.mutate ? dirFingerprint(dir) : null;
-    c.mutate?.(dir);
-    if (c.mutate && dirFingerprint(dir) === before) {
-      failures.push({ name: c.name, code: 1, expectCode: 0, need: "变异生效", text: "变异没有改动任何文件" });
-      console.log(`  [FAIL] ${c.name}`);
-      console.log("         变异**没有改动任何文件** —— 用例坏了，不是闸门坏了。");
-      console.log("         常见原因：变异里硬编码的常量已经过期（比如文档里的数字改过），");
-      console.log("         `String.replace` 找不到就静默返回原串 → 检查器当然全绿。");
-      console.log("         修法：让变异从**文件里现取**那段文字，别写死（本库真机踩过一次）。");
-      continue;
-    }
-    const out = c.check(dir);
-    // 两种写法：整包断言（基线）或 {r, need, expectCode}
-    const code = out.r ? (out.r.status ?? 1) : out.code;
-    const text = out.r ? `${out.r.stdout ?? ""}${out.r.stderr ?? ""}` : out.out;
-    // raw = **子进程的原始输出**（用例可以显式给；{r,…} 写法默认就是它）。
-    // ⚠️ 为什么需要它（2026-09-13 CI 首跑）：用例失败时只打印 `out`（我自己写的问题串），
-    //    被检查工具的**真实输出一个字都没进日志** ⇒ 远端红灯无法诊断，只能靠猜。
-    //    CI 里没有交互 shell、日志又要鉴权，所以"失败时把原始输出带出来"是唯一的排查通道。
-    const raw = out.raw ?? (out.r ? text : null);
-    const expectCode = out.expectCode;
-    // need：输出里必须出现这段文字；needId：必须出现 `[FAIL] <id>`（用来断言"这项红了"）。
-    // passId：必须出现 `[PASS] <id>`（用来断言"这项**没红**"——放行类用例需要它，
-    //   否则 `needId` 的语义在 exit 0 的用例里就落空了）。
-    const need = out.need ?? (out.needId ? `[FAIL] ${out.needId}` : out.passId ? `[PASS] ${out.passId}` : undefined);
-    const okCode = code === expectCode;
-    const okText = (!need || text.includes(need)) && (!out.needAlso || text.includes(out.needAlso));
-    if (okCode && okText) {
-      pass++;
-      console.log(`  [OK  ] ${c.name}`);
-    } else {
-      failures.push({ name: c.name, code, expectCode, need, text, raw });
-      console.log(`  [FAIL] ${c.name}`);
-      console.log(`         期望退出码 ${expectCode}，实际 ${code}${need ? `；期望输出里含「${need}」，${okText ? "有" : "**没有**"}` : ""}`);
-      // 失败时**总是**带出原始输出（不只 -v）：这是远端（CI）唯一的排查通道，见上面 raw 的注释。
-      if (raw) {
-        const lines = String(raw).split("\n");
-        const tail = lines.length > 20 ? lines.slice(-20) : lines;
-        console.log(`         子进程原始输出（共 ${lines.length} 行${lines.length > 20 ? "，以下是尾部 20 行" : ""}）：`);
-        for (const l of tail) console.log(`         │ ${l}`);
+const shardArg = (() => {
+  const i = process.argv.indexOf("--shard");
+  if (i < 0) return null;
+  const v = process.argv[i + 1] ?? "";
+  if (v === "serial") return { serial: true };
+  const m = /^(\d+)\/(\d+)$/.exec(v);
+  return m ? { k: Number(m[1]), n: Number(m[2]) } : null;
+})();
+const isParallelParent = process.argv.includes("--parallel");
+const jobsArg = (() => {
+  const i = process.argv.indexOf("--jobs");
+  const n = i >= 0 ? Number(process.argv[i + 1]) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 16) : null;
+})();
+
+let pass = 0;
+let notRun = 0;                    // "没跑成"：子进程起不来（不是"闸门没抓住"）
+const notRunList = [];
+const failures = [];
+
+// 跑一批用例，返回合并后的文本（**整块返回**：并行时避免多行输出互相插队）
+const runCases = (list) => {
+  const buf = [];
+  const say = (s) => buf.push(s);
+  for (const c of list) {
+    const dir = copyLib();
+    try {
+      // ── 变异必须真的改到东西（见上面 fingerprint 的注释）──
+      // 没有 mutate 的用例（基线、纯静态检查）跳过这道闸门。
+      const before = c.mutate ? dirFingerprint(dir) : null;
+      c.mutate?.(dir);
+      if (c.mutate && dirFingerprint(dir) === before) {
+        failures.push({ name: c.name, code: 1, expectCode: 0, need: "变异生效", text: "变异没有改动任何文件" });
+        say(`  [FAIL] ${c.name}`);
+        say("         变异**没有改动任何文件** —— 用例坏了，不是闸门坏了。");
+        say("         常见原因：变异里硬编码的常量已经过期（比如文档里的数字改过），");
+        say("         `String.replace` 找不到就静默返回原串 → 检查器当然全绿。");
+        say("         修法：让变异从**文件里现取**那段文字，别写死（本库真机踩过一次）。");
+        continue;
       }
+      const out = c.check(dir);
+      // ⚠️ 硬化（2026-09-14）：`spawnSync` **起不来子进程**时 `status` 是 null、`error` 有值。
+      //    旧写法 `r.status ?? 1` 会把它当成"退出码 1" ⇒ **偶发的"起不来"会被读成"闸门抓不住错误"**，
+      //    那是假红，与 N1 同类（"没跑成"被说成"查过了 / 失败了"）。
+      //    这里单独判成一档：**不计入失败，但必须看得见**，且整轮退出码走 3（没结论），
+      //    免得提交钩子/CI 把"环境起不来"读成"检查器坏了"。
+      if (out.r && out.r.error) {
+        notRun++;
+        notRunList.push(`${c.name} —— 子进程起不来（${out.r.error.code ?? out.r.error.message}）`);
+        say(`  [没跑成] ${c.name} —— 子进程起不来（${out.r.error.code ?? out.r.error.message}）；这不是"闸门没抓住"`);
+        continue;
+      }
+      // 两种写法：整包断言（基线）或 {r, need, expectCode}
+      const code = out.r ? (out.r.status ?? 1) : out.code;
+      const text = out.r ? `${out.r.stdout ?? ""}${out.r.stderr ?? ""}` : out.out;
+      // raw = **子进程的原始输出**（用例可以显式给；{r,…} 写法默认就是它）。
+      // ⚠️ 为什么需要它（2026-09-13 CI 首跑）：用例失败时只打印 `out`（我自己写的问题串），
+      //    被检查工具的**真实输出一个字都没进日志** ⇒ 远端红灯无法诊断，只能靠猜。
+      //    CI 里没有交互 shell、日志又要鉴权，所以"失败时把原始输出带出来"是唯一的排查通道。
+      const raw = out.raw ?? (out.r ? text : null);
+      const expectCode = out.expectCode;
+      // need：输出里必须出现这段文字；needId：必须出现 `[FAIL] <id>`（用来断言"这项红了"）。
+      // passId：必须出现 `[PASS] <id>`（用来断言"这项**没红**"——放行类用例需要它，
+      //   否则 `needId` 的语义在 exit 0 的用例里就落空了）。
+      const need = out.need ?? (out.needId ? `[FAIL] ${out.needId}` : out.passId ? `[PASS] ${out.passId}` : undefined);
+      const okCode = code === expectCode;
+      const okText = (!need || text.includes(need)) && (!out.needAlso || text.includes(out.needAlso));
+      if (okCode && okText) {
+        pass++;
+        say(`  [OK  ] ${c.name}`);
+      } else {
+        failures.push({ name: c.name, code, expectCode, need, text, raw });
+        say(`  [FAIL] ${c.name}`);
+        say(`         期望退出码 ${expectCode}，实际 ${code}${need ? `；期望输出里含「${need}」，${okText ? "有" : "**没有**"}` : ""}`);
+        // 失败时**总是**带出原始输出（不只 -v）：这是远端（CI）唯一的排查通道，见上面 raw 的注释。
+        if (raw) {
+          const lines = String(raw).split("\n");
+          const tail = lines.length > 20 ? lines.slice(-20) : lines;
+          say(`         子进程原始输出（共 ${lines.length} 行${lines.length > 20 ? "，以下是尾部 20 行" : ""}）：`);
+          for (const l of tail) say(`         │ ${l}`);
+        }
+      }
+      if (VERBOSE) say(text.split("\n").map((l) => `         │ ${l}`).join("\n"));
+    } catch (e) {
+      failures.push({ name: c.name, err: String(e) });
+      say(`  [FAIL] ${c.name} —— 用例本身抛异常：${e}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    if (VERBOSE) console.log(text.split("\n").map((l) => `         │ ${l}`).join("\n"));
-  } catch (e) {
-    failures.push({ name: c.name, err: String(e) });
-    console.log(`  [FAIL] ${c.name} —— 用例本身抛异常：${e}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
+  return buf.join("\n");
+};
+
+// 子进程模式：只跑这一片，输出（父进程会按序拼回）
+if (shardArg) {
+  const list = shardArg.serial
+    ? serialCases
+    : parallelCases.filter((_, i) => i % shardArg.n === shardArg.k);
+  console.log(runCases(list));
+  console.log(`SHARD ${shardArg.serial ? "serial" : `${shardArg.k}/${shardArg.n}`} pass=${pass} fail=${failures.length} notrun=${notRun}`);
+  if (failures.length) {
+    console.log("失败详情（说明闸门没拦住这类错误，等于形同虚设）：");
+    for (const f of failures) console.log(`  · ${f.name}`);
+  }
+  for (const n of notRunList) console.log(`  [没跑成] ${n}`);
+  // 退出码分三档（与 verify-all 的约定一致）：0 通过 / 1 有真失败 / 3 有"没跑成"
+  process.exit(failures.length ? 1 : notRun ? 3 : 0);
 }
 
+// 父进程模式：并发起 N 片 + 串行跑"动代码页"那条，输出按序合并
+if (isParallelParent) {
+  const { spawn } = await import("node:child_process");
+  const { cpus } = await import("node:os");
+  const JOBS = jobsArg ?? Math.min(6, Math.max(2, (cpus().length || 4) - 1));
+  const self = fileURLToPath(import.meta.url);
+  const runChild = (args) => new Promise((res) => {
+    const p = spawn(process.execPath, [self, ...args], { cwd: ROOT, env: process.env });
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.stderr.on("data", (d) => { out += d; });
+    p.on("close", (code) => res({ code, out }));
+  });
+  // ① 并行：N 片普通用例
+  const shardResults = await Promise.all(
+    Array.from({ length: JOBS }, (_, k) => runChild(["--shard", `${k}/${JOBS}`]))
+  );
+  // ② 串行：动控制台代码页的那条（独占控制台，不能和上面同时跑）
+  const serialResult = await runChild(["--shard", "serial"]);
+  for (const r of [...shardResults, serialResult]) process.stdout.write(r.out + "\n");
+  // 汇总（各片的 pass/fail/notrun 由子进程的 SHARD 行报出）
+  const parsed = [...shardResults, serialResult].map((r) => /SHARD .* pass=(\d+) fail=(\d+) notrun=(\d+)/.exec(r.out)).filter(Boolean);
+  const totals = parsed.reduce((a, m) => ({ pass: a.pass + Number(m[1]), fail: a.fail + Number(m[2]), notRun: a.notRun + Number(m[3]) }), { pass: 0, fail: 0, notRun: 0 });
+  const bad = shardResults.some((r) => r.code === 1) || serialResult.code === 1;
+  const notrun = shardResults.some((r) => r.code === 3) || serialResult.code === 3 || totals.notRun > 0;
+  console.log("");
+  console.log(`合计 ${CASES.length} 个用例 | 通过 ${totals.pass} | 失败 ${totals.fail} | 没跑成 ${totals.notRun}（并行 ${JOBS} 片）`);
+  if (bad || totals.fail) {
+    console.log("判定: 有检查器没抓住注入的错误（详情见上面对应分片的输出）");
+    process.exit(1);
+  }
+  if (notrun) {
+    console.log("判定: 有子进程没起来 —— **这一轮没有完整结论**（没跑成 ≠ 通过），别读成全绿");
+    process.exit(3);
+  }
+  console.log("判定: 检查器行为正确（正例放行、错例拦住）");
+  process.exit(0);
+}
+
+// 默认（无参数）：串行跑全部 —— 与改造前行为一致，便于对照与排查
+console.log("=== 检查器自检（变异测试：注入已知错误，断言闸门必须拦住）===\n");
+console.log(runCases(CASES));
+
 console.log("");
-console.log(`合计 ${CASES.length} 个用例 | 通过 ${pass} | 失败 ${failures.length}`);
+console.log(`合计 ${CASES.length} 个用例 | 通过 ${pass} | 失败 ${failures.length} | 没跑成 ${notRun}`);
 if (failures.length) {
   console.log("\n失败详情（说明闸门没拦住这类错误，等于形同虚设）：");
   for (const f of failures) {
@@ -1576,6 +1682,11 @@ if (failures.length) {
     if (f.text) console.log(f.text.split("\n").slice(0, 8).map((l) => `      ${l}`).join("\n"));
   }
   process.exit(1);
+}
+if (notRun) {
+  for (const n of notRunList) console.log(`  [没跑成] ${n}`);
+  console.log("判定: 有子进程没起来 —— **这一轮没有完整结论**（没跑成 ≠ 通过），别读成全绿");
+  process.exit(3);
 }
 console.log("判定: 检查器行为正确（正例放行、错例拦住）");
 process.exit(0);

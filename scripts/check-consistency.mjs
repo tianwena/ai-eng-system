@@ -146,12 +146,20 @@ if (FACTS) {
   const iterName = arrName
     ? new RegExp(`for\\s*\\(\\s*const\\s+\\w+\\s+of\\s+(${arrName})\\s*\\)`).exec(selfTestSrc)?.[1]
     : undefined;
+  // ⚠️ 2026-09-14：自检改成"分片 + 父进程并发"之后，迭代发生在 `runCases(CASES)` 里，
+  //    不再是裸的 for-of —— 于是上面那条判据报"真值来源已经失效"（**机制是对的**：它发现
+  //    自己钉的写法不见了）。但**事实没有变**：那个数组仍然被真正迭代。
+  //    所以判据跟着事实走，两种写法都认；**"两者都没有"才报失效**（那才是真的没人迭代）。
+  const iterViaCall = arrName
+    ? new RegExp(`runCases\\s*\\(\\s*(${arrName})\\s*\\)`).exec(selfTestSrc)?.[1]
+    : undefined;
+  const iterated = iterName ?? iterViaCall;
   const selfTestCases = [...selfTestSrc.matchAll(/^\s{2}\{\s*$/gm)].length;
   const selfTestNames = [...selfTestSrc.matchAll(/^\s{4}name:\s*"/gm)].length;
   const selfTestTruthBroken =
     !arrName ? "找不到用例数组的声明（`const <名字> = [`）"
-      : !iterName ? "找不到 `for (const x of <名字>)` —— 用例还在，但已经没人迭代它"
-        : iterName !== arrName ? `迭代的是 ${iterName}，而用例数组叫 ${arrName} —— 用例不会再被执行`
+      : !iterated ? "找不到 `for (const x of <名字>)`，也找不到 `runCases(<名字>)` —— 用例还在，但已经没人迭代它"
+        : iterated !== arrName ? `迭代的是 ${iterated}，而用例数组叫 ${arrName} —— 用例不会再被执行`
           : selfTestCases === 0 ? "找不到任何用例对象"
             : selfTestCases !== selfTestNames ? `用例对象 ${selfTestCases} 个，但 name: 只有 ${selfTestNames} 个（用例结构被改了）`
               : null;
